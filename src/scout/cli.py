@@ -11,6 +11,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from scout import config
+from scout.cache import DEFAULT_CACHE_PATH, AuditCache
 from scout.config import MissingCredential
 from scout.deepseek import DeepSeekError
 from scout.github import GitHubClient, GitHubError
@@ -234,8 +235,27 @@ def _print_passed(screening: ScreeningRun, screened: int) -> None:
 
 
 def cmd_cache(args: argparse.Namespace) -> int:
-    print(f"cache {args.cache_command}: {NOT_YET}")
-    return 0
+    """Обслуживание кэша аудитов. Сам кэш наполнится, когда появится Слой 2."""
+    with AuditCache(DEFAULT_CACHE_PATH) as cache:
+        if args.cache_command == "list":
+            entries = cache.entries()
+            if not entries:
+                print("Кэш пуст.")
+                return 0
+
+            print(f"Записей в кэше: {len(entries)}")
+            for entry in entries:
+                print(
+                    f"  {entry.key}  {entry.payload.full_name}"
+                    f"  вердикт {entry.payload.verdict.value}"
+                    f"  попаданий {entry.hits}"
+                    f"  от {entry.created_at.date().isoformat()}"
+                )
+            return 0
+
+        removed = cache.drop(args.repo_id)
+        print(f"Удалено записей: {removed}")
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:

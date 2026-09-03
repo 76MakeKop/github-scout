@@ -5,5 +5,8 @@ __pycache__/
 .ruff_cache/
 .env
 eval/
+.cache/
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 .DS_Store
