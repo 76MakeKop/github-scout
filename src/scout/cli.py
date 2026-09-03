@@ -1,6 +1,6 @@
-"""CLI. Конвейер доходит до извлечённого интента и останавливается.
+"""CLI. Конвейер доходит до сгенерированных поисковых запросов и останавливается.
 
-Генерации запросов, поиска и слоёв здесь ещё нет — следующие пункты ROADMAP.md.
+Самого поиска и слоёв здесь ещё нет — следующие пункты ROADMAP.md.
 """
 
 import argparse
@@ -15,6 +15,7 @@ from scout.config import MissingCredential
 from scout.deepseek import DeepSeekError
 from scout.intent import extract_intent
 from scout.log import RunLogger, new_run_id
+from scout.queries import QueryGenerationError, build_query_set
 from scout.schemas import ScanOptions, ScanRequest
 
 NOT_YET = "реализуется на неделе 2"
@@ -129,7 +130,22 @@ def cmd_scan(args: argparse.Namespace) -> int:
         **extraction.usage,
     )
 
-    log.info("reached_stub", stage="queries", note="генерация запросов: следующий пункт плана")
+    try:
+        query_set = build_query_set(intent, logger=log)
+    except QueryGenerationError as exc:
+        log.error("queries_failed", detail=str(exc))
+        print(f"Не удалось собрать поисковые запросы: {exc}", file=sys.stderr)
+        return 6
+
+    log.info(
+        "queries_generated",
+        query_count=len(query_set.queries),
+        generator_version=query_set.generator_version,
+        families=[query.family.value for query in query_set.queries],
+        queries=[query.q for query in query_set.queries],
+    )
+
+    log.info("reached_stub", stage="search", note="поиск по GitHub: следующий пункт плана")
     return 0
 
 
