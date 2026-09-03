@@ -1,4 +1,4 @@
-"""CLI: стык извлечённого интента с генератором запросов.
+"""CLI и его окружение: стык интента с генератором запросов, загрузка `.env`.
 
 DeepSeek здесь не дёргается — `extract_intent` подменяется целиком. Проверяется
 не качество интента (это дело `test_intent.py`), а то, что конвейер доходит
@@ -6,10 +6,12 @@ DeepSeek здесь не дёргается — `extract_intent` подменя�
 """
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
-from scout import cli
+from scout import cli, config
 from scout.intent import IntentExtraction
 from scout.queries import QueryGenerationError
 
@@ -100,3 +102,83 @@ def test_intent_failure_does_not_reach_the_generator(monkeypatch, capsys):
 
     assert cli.main(["scan", QUERY]) == 5
     assert "queries_generated" not in events(capsys)
+
+
+# --------------------------------------------------------------------------
+# Загрузка .env
+# --------------------------------------------------------------------------
+
+
+def test_dotenv_in_project_root_is_visible_in_config(tmp_path, monkeypatch):
+    """Ключ вписан в `.env` — и `config` его видит, без плясок в терминале.
+
+    `os.environ` подменяется словарём: иначе тест протёк бы настоящим ключом
+    в остальные тесты.
+    """
+    monkeypatch.setattr(os, "environ", {})
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-from-dotenv\n", encoding="utf-8")
+
+    config.load_dotenv(env_file)
+
+    assert config.deepseek_api_key() == "sk-from-dotenv"
+
+
+def test_dotenv_path_points_at_project_root():
+    """Файл ищется рядом с `.env.example`, а не рядом с исходниками пакета."""
+    assert config.DOTENV_PATH.name == ".env"
+    assert (config.DOTENV_PATH.parent / ".env.example").exists()
+
+
+def test_real_environment_wins_over_dotenv(tmp_path, monkeypatch):
+    """В CI ключи уже в окружении, и забытый локальный `.env` не должен их перебить."""
+    monkeypatch.setattr(os, "environ", {"DEEPSEEK_API_KEY": "sk-from-ci"})
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-from-dotenv\n", encoding="utf-8")
+
+    config.load_dotenv(env_file)
+
+    assert config.deepseek_api_key() == "sk-from-ci"
+
+
+def test_missing_dotenv_is_silent():
+    """Отсутствие файла — норма: в CI переменные приходят из окружения."""
+    assert config.load_dotenv(Path("/nonexistent/.env")) == 0
+
+
+def test_dotenv_parsing_handles_real_world_lines(tmp_path, monkeypatch):
+    environ: dict[str, str] = {}
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "# комментарий",
+                "",
+                "DEEPSEEK_API_KEY=sk-plain",
+                'GITHUB_TOKEN="ghp-quoted"',
+                "export QWEN_API_KEY = qwen-spaced ",
+                "СЛОМАННАЯ_СТРОКА_БЕЗ_РАВНО",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert config.load_dotenv(env_file, environ=environ) == 3
+    assert environ == {
+        "DEEPSEEK_API_KEY": "sk-plain",
+        "GITHUB_TOKEN": "ghp-quoted",
+        "QWEN_API_KEY": "qwen-spaced",
+    }
+
+
+def test_empty_value_does_not_shadow_a_missing_key(tmp_path, monkeypatch):
+    """`.env.example` целиком состоит из пустых значений: копию без правки
+    надо считать отсутствием ключа, а не пустым ключом."""
+    monkeypatch.setattr(os, "environ", {})
+    env_file = tmp_path / ".env"
+    env_file.write_text("DEEPSEEK_API_KEY=\n", encoding="utf-8")
+
+    config.load_dotenv(env_file)
+
+    with pytest.raises(config.MissingCredential):
+        config.deepseek_api_key()
