@@ -268,6 +268,21 @@ def screen(
         if item is None:
             failed.append(candidate.full_name)
             continue
+
+        if item.verdict is ScreeningVerdict.REJECT and logger:
+            # Без этой строки в логе виден только `passed`, и на разборе recall
+            # (день 10) нельзя отличить «эталон не нашёлся поиском» от
+            # «нашёлся, но Слой 1 его отбросил» — а это разные починки.
+            logger.info(
+                "candidate_rejected",
+                repo_id=item.repo_id,
+                full_name=item.full_name,
+                relevance=item.relevance,
+                verdict=item.verdict.value,
+                red_flags=[flag.value for flag in item.red_flags],
+                reasons=item.reasons,
+            )
+
         results.append(item)
 
     result = ScreeningResult(

@@ -169,6 +169,38 @@ def test_rejected_candidates_never_reach_passed():
     assert result.passed == [2]
 
 
+def test_rejected_candidate_is_logged_with_flags_and_reasons():
+    """День 10 разбирает провалы recall: без причин отказа не отличить потерю
+    на поиске от потери на скрининге."""
+    candidates = [candidate(1)]
+    deepseek = FakeDeepSeek(
+        [
+            answer(
+                relevance=0.1,
+                verdict="reject",
+                reasons=["подборка ссылок, своего кода нет"],
+                red_flags=["demo-or-tutorial", "wrong-domain"],
+            )
+        ]
+    )
+    logger = Recorder()
+
+    run(candidates, deepseek=deepseek, logger=logger)
+
+    rejected = next(fields for event, fields in logger.events if event == "candidate_rejected")
+    assert rejected["repo_id"] == 1
+    assert rejected["full_name"] == "owner1/repo1"
+    assert rejected["verdict"] == "reject"
+    assert rejected["red_flags"] == ["demo-or-tutorial", "wrong-domain"]
+    assert rejected["reasons"] == ["подборка ссылок, своего кода нет"]
+
+
+def test_passing_candidate_is_not_logged_as_rejected():
+    logger = Recorder()
+    run([candidate(1)], logger=logger)
+    assert "candidate_rejected" not in logger.names()
+
+
 def test_equal_relevance_is_ordered_by_repo_id():
     """Идемпотентность: при равном relevance порядок не должен зависеть от словаря."""
     candidates = [candidate(9), candidate(4)]
