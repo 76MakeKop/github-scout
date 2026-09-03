@@ -103,6 +103,18 @@ QUERY_GENERATOR_VERSION = "qg-1"
 
 PEAK_WINDOWS_UTC = ((1, 4), (6, 10))
 
+# --------------------------------------------------------------------------
+# Fallback Слоя 2 (ARCHITECTURE.md → «Обработка ошибок»)
+# --------------------------------------------------------------------------
+
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+OPENROUTER_FALLBACK_MODEL = "qwen/qwen3.8-max"
+"""Идентификатор той же модели у OpenRouter. В схемах и отчётах она называется
+`qwen3.8-max` (`SCHEMAS.md`, enum `ModelName`) — префикс `qwen/` относится
+к маршрутизации OpenRouter, а не к модели. Кода переключения здесь нет:
+по ROADMAP.md это день 14."""
+
 
 def is_peak(moment: datetime | None = None) -> bool:
     """Peak: 01:00–04:00 и 06:00–10:00 UTC. Считается строго по UTC."""
@@ -135,6 +147,6 @@ def github_token() -> str:
     return _required("GITHUB_TOKEN", "поиск по GitHub")
 
 
-def qwen_api_key() -> str | None:
-    """Необязателен: нужен только для fallback Слоя 2."""
-    return os.environ.get("QWEN_API_KEY") or None
+def openrouter_api_key() -> str | None:
+    """Необязателен: нужен только для fallback Слоя 2 (ROADMAP.md, день 14)."""
+    return os.environ.get("OPENROUTER_API_KEY") or None

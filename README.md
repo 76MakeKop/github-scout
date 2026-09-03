@@ -1,7 +1,7 @@
 # GitHub Scout
 
 **Сфера:** вход для человека — что это, как поставить, как запустить, что получишь.
-**Обновлено:** 2026-09-03.
+**Обновлено:** 2026-09-04.
 
 ## Что это
 
@@ -46,7 +46,7 @@ pre-commit install
 |---|---|---|
 | `DEEPSEEK_API_KEY` | да | интент, Слой 1, Слой 2 |
 | `GITHUB_TOKEN` | да | без токена лимит поиска 10 запросов/мин вместо 30 |
-| `QWEN_API_KEY` | нет | fallback Слоя 2, если DeepSeek отдаёт 5xx |
+| `OPENROUTER_API_KEY` | нет | fallback Слоя 2 через OpenRouter (`qwen/qwen3.8-max`), если DeepSeek отдаёт 5xx |
 
 Токену GitHub достаточно прав на чтение публичных репозиториев — `public_repo`
 для classic-токена, `Public repositories (read-only)` для fine-grained.
