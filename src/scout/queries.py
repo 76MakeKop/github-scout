@@ -209,6 +209,25 @@ def _broad_fallback(intent: Intent) -> _Draft | None:
 # --------------------------------------------------------------------------
 
 
+def build_fallback_query(intent: Intent, *, query_id: str) -> SearchQuery | None:
+    """Тот же широкий невод для вырожденного случая «мало уникальных кандидатов».
+
+    QUERIES.md шаг 5 предписывает добор без `language:` и без `stars:` уже после
+    того, как выдача оказалась бедной. Строку собирает та же функция, что и добор
+    по бедности интента, — двух разных «широких неводов» в системе быть не должно.
+    """
+    draft = _broad_fallback(intent)
+    if draft is None or len(draft.q) > MAX_QUERY_LENGTH:
+        return None
+    return SearchQuery(
+        id=query_id,
+        family=draft.family,
+        q=draft.q,
+        sort=_SORT_BY_FAMILY[draft.family],
+        per_page=PER_PAGE,
+    )
+
+
 def build_query_set(
     intent: Intent,
     *,

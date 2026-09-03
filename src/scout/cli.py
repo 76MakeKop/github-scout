@@ -1,6 +1,6 @@
-"""CLI. Конвейер доходит до сгенерированных поисковых запросов и останавливается.
+"""CLI. Конвейер доходит до конца Слоя 1 и останавливается перед аудитом.
 
-Самого поиска и слоёв здесь ещё нет — следующие пункты ROADMAP.md.
+Слоя 2, кэша и отчёта здесь ещё нет — следующие пункты ROADMAP.md.
 """
 
 import argparse
@@ -13,12 +13,17 @@ from pydantic import ValidationError
 from scout import config
 from scout.config import MissingCredential
 from scout.deepseek import DeepSeekError
+from scout.github import GitHubClient, GitHubError
 from scout.intent import extract_intent
 from scout.log import RunLogger, new_run_id
 from scout.queries import QueryGenerationError, build_query_set
-from scout.schemas import ScanOptions, ScanRequest
+from scout.schemas import ScanOptions, ScanRequest, ScreeningItem
+from scout.screening import ScreeningRun, screen
+from scout.search import collect_candidates
 
 NOT_YET = "реализуется на неделе 2"
+
+BUILD_ADVICE = "Кандидатов нет — рекомендация BUILD: подходящего открытого решения не нашлось."
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -145,8 +150,87 @@ def cmd_scan(args: argparse.Namespace) -> int:
         queries=[query.q for query in query_set.queries],
     )
 
-    log.info("reached_stub", stage="search", note="поиск по GitHub: следующий пункт плана")
+    try:
+        github = GitHubClient(token=config.github_token(), logger=log)
+    except MissingCredential as exc:
+        log.error("missing_credential", detail=str(exc))
+        print(f"Не хватает ключа: {exc}", file=sys.stderr)
+        return 3
+
+    try:
+        found = collect_candidates(
+            query_set,
+            intent=intent,
+            github=github,
+            limit=request.options.max_candidates,
+            logger=log,
+        )
+    except GitHubError as exc:
+        log.error("search_failed_hard", detail=str(exc))
+        print(f"Поиск по GitHub не удался: {exc}", file=sys.stderr)
+        return 7
+
+    if not found.candidates:
+        log.info("scan_build_recommended", reason="no_candidates", queries=found.queries_used)
+        print(BUILD_ADVICE)
+        print(f"Проверено запросов: {len(found.queries_used)}.")
+        return 0
+
+    log.info("reached_stub", stage="screening", note="Слой 1: скрининг кандидатов")
+
+    try:
+        screening = screen(
+            found.candidates,
+            intent,
+            request_id=request.request_id,
+            github=github,
+            logger=log,
+            limit=request.options.audit_limit,
+        )
+    except MissingCredential as exc:
+        log.error("missing_credential", detail=str(exc))
+        print(f"Не хватает ключа: {exc}", file=sys.stderr)
+        return 3
+    except DeepSeekError as exc:
+        log.error("deepseek_failed", detail=str(exc))
+        print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
+        return 4
+
+    usage = screening.result.token_usage
+    log.info(
+        "screening_done",
+        screened=len(screening.result.results),
+        passed=len(screening.result.passed),
+        failed=len(screening.failed),
+        input_tokens=usage.input_tokens,
+        cached_input_tokens=usage.cached_input_tokens,
+        output_tokens=usage.output_tokens,
+        prompt_version=screening.result.prompt_version,
+    )
+
+    if not screening.result.passed:
+        log.info("scan_build_recommended", reason="none_passed", screened=len(found.candidates))
+        print("Ни один кандидат не прошёл скрининг — рекомендация BUILD.")
+        return 0
+
+    _print_passed(screening, len(found.candidates))
+
+    log.info("reached_stub", stage="audit", note="Слой 2: следующий пункт плана")
     return 0
+
+
+def _print_passed(screening: ScreeningRun, screened: int) -> None:
+    """Отчёта на дне 5 ещё нет — печатаем то, что уже есть: кто прошёл и почему."""
+    by_id: dict[int, ScreeningItem] = {item.repo_id: item for item in screening.result.results}
+
+    print(f"Слой 1: {len(screening.result.passed)} из {screened} кандидатов прошли скрининг.\n")
+    for position, repo_id in enumerate(screening.result.passed, start=1):
+        item = by_id[repo_id]
+        print(f"{position:2}. {item.full_name}  relevance {item.relevance:.2f}")
+        print(f"    {item.reasons[0]}")
+
+    if screening.failed:
+        print(f"\nНе разобраны моделью: {', '.join(screening.failed)}")
 
 
 def cmd_cache(args: argparse.Namespace) -> int:

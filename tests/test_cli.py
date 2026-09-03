@@ -1,8 +1,9 @@
-"""CLI и его окружение: стык интента с генератором запросов, загрузка `.env`.
+"""CLI и его окружение: порядок стадий конвейера, коды возврата, загрузка `.env`.
 
-DeepSeek здесь не дёргается — `extract_intent` подменяется целиком. Проверяется
-не качество интента (это дело `test_intent.py`), а то, что конвейер доходит
-до сгенерированных запросов и правильно ведёт себя при отказе генератора.
+Ни GitHub, ни DeepSeek здесь не дёргаются — `extract_intent`, `collect_candidates`
+и `screen` подменяются целиком. Проверяется не качество слоёв (это `test_intent.py`,
+`test_search.py`, `test_screen.py`), а то, как CLI их связывает и что делает,
+когда очередная стадия ничего не вернула.
 """
 
 import json
@@ -12,13 +13,51 @@ from pathlib import Path
 import pytest
 
 from scout import cli, config
+from scout.github import GitHubError
 from scout.intent import IntentExtraction
 from scout.queries import QueryGenerationError
+from scout.schemas import ModelName, PricingWindow, ScreeningResult, TokenUsage
+from scout.screening import ScreeningRun
+from scout.search import SearchOutcome
 
 # Эталонный интент живёт в одном месте на все тесты — в модуле генератора запросов.
 from test_queries import make_intent
+from test_screen import candidate
 
 QUERY = "нужен парсер PDF-таблиц на Python"
+
+
+def screening_run(request_id, passed=(1, 2), failed=()):
+    """Минимальный валидный `ScreeningResult` — стык проверяется, а не содержание."""
+    results = [
+        {
+            "repo_id": repo_id,
+            "full_name": f"owner{repo_id}/repo{repo_id}",
+            "relevance": 0.9,
+            "verdict": "pass",
+            "reasons": [f"причина для {repo_id}"],
+        }
+        for repo_id in passed
+    ]
+    return ScreeningRun(
+        result=ScreeningResult(
+            request_id=request_id,
+            layer=1,
+            model=ModelName.FLASH,
+            prompt_version="l1-1",
+            results=results,
+            passed=list(passed),
+            token_usage=TokenUsage(
+                model=ModelName.FLASH,
+                input_tokens=7500,
+                cached_input_tokens=6000,
+                output_tokens=600,
+                cost_usd=0.0,
+                pricing_window=PricingWindow.OFF_PEAK,
+            ),
+        ),
+        failed=list(failed),
+    )
 
 
 @pytest.fixture
@@ -36,8 +75,26 @@ def ok_intent(monkeypatch):
     monkeypatch.setattr(cli, "extract_intent", fake_extract)
 
 
-def events(capsys) -> dict[str, dict]:
-    """Последнее событие каждого типа из потока JSON-логов.
+@pytest.fixture
+def offline(monkeypatch):
+    """Поиск и скрининг без сети: два кандидата, оба прошли."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp-fake")
+
+    def fake_collect(query_set, *, intent, github, limit, logger=None, **kwargs):
+        return SearchOutcome(
+            candidates=[candidate(1), candidate(2)],
+            queries_used=[query.q for query in query_set.queries],
+        )
+
+    def fake_screen(candidates, intent, *, request_id, github, logger=None, limit=10, **kwargs):
+        return screening_run(request_id)
+
+    monkeypatch.setattr(cli, "collect_candidates", fake_collect)
+    monkeypatch.setattr(cli, "screen", fake_screen)
+
+
+def _all_events(capsys) -> list[dict]:
+    """Поток JSON-логов по порядку.
 
     В том же stderr лежат и человекочитаемые сообщения об ошибках — они не JSON
     и пропускаются.
@@ -48,10 +105,15 @@ def events(capsys) -> dict[str, dict]:
             parsed.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    return {record["event"]: record for record in parsed}
+    return parsed
 
 
-def test_scan_reaches_generated_queries(ok_intent, capsys):
+def events(capsys) -> dict[str, dict]:
+    """Последнее событие каждого типа."""
+    return {record["event"]: record for record in _all_events(capsys)}
+
+
+def test_scan_reaches_generated_queries(ok_intent, offline, capsys):
     assert cli.main(["scan", QUERY]) == 0
 
     emitted = events(capsys)
@@ -68,7 +130,7 @@ def test_scan_reaches_generated_queries(ok_intent, capsys):
     ]
 
 
-def test_generated_queries_are_logged_verbatim(ok_intent, capsys):
+def test_generated_queries_are_logged_verbatim(ok_intent, offline, capsys):
     """Строки запросов уходят в лог: без них отладку выдачи не провести."""
     cli.main(["scan", QUERY])
 
@@ -77,9 +139,81 @@ def test_generated_queries_are_logged_verbatim(ok_intent, capsys):
     assert len(queries) == 7
 
 
-def test_stub_now_stands_at_search(ok_intent, capsys):
+def test_stub_now_stands_at_audit(ok_intent, offline, capsys):
+    """Слой 1 пройден — следующая незакрытая стадия конвейера уже аудит."""
     cli.main(["scan", QUERY])
-    assert events(capsys)["reached_stub"]["stage"] == "search"
+    assert events(capsys)["reached_stub"]["stage"] == "audit"
+
+
+def test_screening_stage_is_announced_before_layer_one(ok_intent, offline, capsys):
+    cli.main(["scan", QUERY])
+
+    stages = [
+        record["stage"] for record in _all_events(capsys) if record["event"] == "reached_stub"
+    ]
+    assert stages == ["screening", "audit"]
+
+
+def test_passed_candidates_are_printed_with_relevance_and_reason(ok_intent, offline, capsys):
+    assert cli.main(["scan", QUERY]) == 0
+
+    out = capsys.readouterr().out
+    assert "owner1/repo1" in out
+    assert "relevance 0.90" in out
+    assert "причина для 1" in out
+
+
+def test_screening_totals_reach_the_log(ok_intent, offline, capsys):
+    cli.main(["scan", QUERY])
+
+    done = events(capsys)["screening_done"]
+    assert done["passed"] == 2
+    assert done["input_tokens"] == 7500
+    assert done["prompt_version"] == "l1-1"
+
+
+def test_empty_search_gives_build_recommendation_and_exit_zero(
+    ok_intent, offline, monkeypatch, capsys
+):
+    """Ноль кандидатов — это ответ «пиши сам», а не сбой скана (QUERIES.md, шаг 5)."""
+
+    def nothing_found(query_set, *, intent, github, limit, logger=None, **kwargs):
+        return SearchOutcome(queries_used=[query.q for query in query_set.queries])
+
+    monkeypatch.setattr(cli, "collect_candidates", nothing_found)
+
+    assert cli.main(["scan", QUERY]) == 0
+
+    captured = capsys.readouterr()
+    assert "BUILD" in captured.out
+    assert "Проверено запросов: 7." in captured.out
+
+
+def test_nobody_passing_screening_also_gives_build(ok_intent, offline, monkeypatch, capsys):
+    def none_passed(candidates, intent, *, request_id, github, logger=None, limit=10, **kwargs):
+        return screening_run(request_id, passed=())
+
+    monkeypatch.setattr(cli, "screen", none_passed)
+
+    assert cli.main(["scan", QUERY]) == 0
+    assert "BUILD" in capsys.readouterr().out
+
+
+def test_github_failure_has_its_own_exit_code(ok_intent, offline, monkeypatch, capsys):
+    def explode(query_set, *, intent, github, limit, logger=None, **kwargs):
+        raise GitHubError("500 от GitHub")
+
+    monkeypatch.setattr(cli, "collect_candidates", explode)
+
+    assert cli.main(["scan", QUERY]) == 7
+    assert "search_failed_hard" in events(capsys)
+
+
+def test_missing_github_token_stops_before_the_search(ok_intent, monkeypatch, capsys):
+    monkeypatch.setattr(os, "environ", {"DEEPSEEK_API_KEY": "sk-fake"})
+
+    assert cli.main(["scan", QUERY]) == 3
+    assert "missing_credential" in events(capsys)
 
 
 def test_query_generation_failure_has_its_own_exit_code(ok_intent, monkeypatch, capsys):
@@ -156,7 +290,7 @@ def test_dotenv_parsing_handles_real_world_lines(tmp_path, monkeypatch):
                 "",
                 "DEEPSEEK_API_KEY=sk-plain",
                 'GITHUB_TOKEN="ghp-quoted"',
-                "export QWEN_API_KEY = qwen-spaced ",
+                "export OPENROUTER_API_KEY = sk-or-spaced ",
                 "СЛОМАННАЯ_СТРОКА_БЕЗ_РАВНО",
             ]
         ),
@@ -167,7 +301,7 @@ def test_dotenv_parsing_handles_real_world_lines(tmp_path, monkeypatch):
     assert environ == {
         "DEEPSEEK_API_KEY": "sk-plain",
         "GITHUB_TOKEN": "ghp-quoted",
-        "QWEN_API_KEY": "qwen-spaced",
+        "OPENROUTER_API_KEY": "sk-or-spaced",
     }
 
 
