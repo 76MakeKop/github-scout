@@ -13,11 +13,16 @@ from collections.abc import Callable
 from typing import Any
 
 from scout import config
-from scout.http import DEFAULT_TIMEOUT, Transport, urllib_transport
+from scout.http import HttpError, Transport, urllib_transport
 from scout.log import RunLogger
 
 API_URL = "https://api.deepseek.com/chat/completions"
 BACKOFF_SECONDS = (1.0, 4.0, 16.0)
+
+LLM_TIMEOUT = 60.0
+"""Модели отвечают на порядок медленнее GitHub: у V4-Flash на 1,5k входа уходят
+десятки секунд, часть из них — на рассуждения. Общий таймаут HTTP в 20 с
+рассчитан на GitHub и для модели означает гарантированный обрыв на полпути."""
 
 
 class DeepSeekError(RuntimeError):
@@ -49,7 +54,7 @@ class DeepSeekClient:
         transport: Transport = urllib_transport,
         logger: RunLogger | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float = LLM_TIMEOUT,
     ) -> None:
         self._api_key = api_key
         self._transport = transport
@@ -91,7 +96,27 @@ class DeepSeekClient:
 
         attempt = 0
         while True:
-            response = self._transport("POST", API_URL, headers, payload, self._timeout)
+            try:
+                response = self._transport("POST", API_URL, headers, payload, self._timeout)
+            except HttpError as exc:
+                # ARCHITECTURE.md ставит таймаут в одну строку с 5xx. Без этой
+                # ветки обрыв связи уходил наружу голым исключением и ронял скан.
+                if attempt >= len(BACKOFF_SECONDS):
+                    raise DeepSeekUnavailable(
+                        f"DeepSeek не отвечает после {len(BACKOFF_SECONDS)} повторов: {exc}"
+                    ) from exc
+                delay = _jitter(BACKOFF_SECONDS[attempt])
+                attempt += 1
+                if self._log:
+                    self._log.info(
+                        "deepseek_retry",
+                        reason="transport",
+                        attempt=attempt,
+                        wait_seconds=round(delay, 1),
+                    )
+                self._sleep(delay)
+                continue
+
             self.calls += 1
 
             if response.status == 200:

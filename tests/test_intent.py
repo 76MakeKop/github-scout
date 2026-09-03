@@ -9,8 +9,8 @@ from uuid import uuid4
 import pytest
 
 from scout.config import MissingCredential
-from scout.deepseek import DeepSeekClient, DeepSeekUnavailable, strip_code_fence
-from scout.http import HttpResponse
+from scout.deepseek import LLM_TIMEOUT, DeepSeekClient, DeepSeekUnavailable, strip_code_fence
+from scout.http import DEFAULT_TIMEOUT, HttpError, HttpResponse
 from scout.intent import MAX_ATTEMPTS, extract_intent, load_system_prompt
 
 REQUEST_ID = uuid4()
@@ -174,6 +174,56 @@ def test_429_is_retried():
 
     assert result.status == "ok"
     assert len(slept) == 1
+
+
+# --- таймаут транспорта ---------------------------------------------------
+
+
+class TimingOutTransport:
+    """Первые `failures` вызовов обрываются таймаутом, дальше — обычный ответ."""
+
+    def __init__(self, failures: int, response: HttpResponse | None = None) -> None:
+        self.failures = failures
+        self.response = response or chat_response(GOOD_PAYLOAD)
+        self.calls = 0
+
+    def __call__(self, method, url, headers, body, timeout) -> HttpResponse:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise HttpError(f"таймаут {timeout} с при обращении к {url}")
+        return self.response
+
+
+def test_timeout_is_retried_like_a_server_error():
+    """ARCHITECTURE.md ставит таймаут в одну строку с 5xx: три повтора, затем отказ.
+
+    Живой прогон дня 5 упал именно здесь: таймаут транспорта уходил наружу
+    необработанным исключением и ронял весь скан на первом же кандидате Слоя 1.
+    """
+    transport = TimingOutTransport(failures=2)
+    client, slept = make_client(transport)
+
+    result = extract_intent("парсер PDF", request_id=REQUEST_ID, client=client)
+
+    assert result.status == "ok"
+    assert len(slept) == 2
+    assert slept[0] < slept[1]
+
+
+def test_permanent_timeout_becomes_unavailable_not_a_crash():
+    transport = TimingOutTransport(failures=99)
+    client, slept = make_client(transport)
+
+    with pytest.raises(DeepSeekUnavailable):
+        extract_intent("парсер PDF", request_id=REQUEST_ID, client=client)
+
+    assert len(slept) == 3
+
+
+def test_model_calls_wait_longer_than_github_calls():
+    """20 с хватает GitHub и не хватает модели: у V4-Flash ответ идёт десятками секунд."""
+    assert LLM_TIMEOUT > DEFAULT_TIMEOUT
+    assert DeepSeekClient(api_key="sk-test")._timeout == LLM_TIMEOUT
 
 
 # --- ключ и промпт --------------------------------------------------------
