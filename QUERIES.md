@@ -42,13 +42,19 @@ NL-запрос → `Intent` (схема в `SCHEMAS.md` §2). Модель из
 | `synonym` | `{synonyms[1]} language:{lang} archived:false` | другая формулировка той же задачи |
 | `topic` | `topic:{domain[0]} topic:{domain[1]} archived:false` | кураторские топики, не текст |
 | `library` | `{known_libraries} in:name,description` | гипотезы имён библиотек, OR-список |
-| `readme` | `"{synonyms[2]}" in:readme language:{lang}` | точная фраза внутри README |
-| `broad` | `{core_noun} language:{lang} stars:>50` | широкий невод против переспецификации |
-| `recent` | `{synonyms[0]} language:{lang} pushed:>{today-540d}` | живые проекты, сортировка по `updated` |
+| `readme` | `"{synonyms[2]}" in:readme language:{lang} archived:false` | точная фраза внутри README |
+| `broad` | `{core_noun} language:{lang} stars:>50 archived:false` | широкий невод против переспецификации |
+| `recent` | `{synonyms[0]} language:{lang} pushed:>{today-540d} archived:false` | живые проекты, сортировка по `updated` |
+
+`core_noun` — поля с таким именем в `Intent` нет, его выводит код: первые два значимых
+слова из `synonyms[0]`, служебные отброшены. Меньше слов — шире выдача, а это и есть
+задача семейства. Переформулировать синоним код не пытается: морфологию ему взять неоткуда.
 
 Правила сборки:
 
 - `language:` подставляется, только если `Intent.languages` непуст. Иначе квалификатор опускается.
+  Берётся **первый** язык из списка: квалификаторы GitHub объединяются по И, и два `language:`
+  дали бы гарантированно пустую выдачу.
 - `archived:false` — во всех семействах, кроме `library`.
 - **`license:` не используется никогда.** Лицензия — атрибут отчёта, а не фильтр
   (`CLAUDE.md`, запрет 4). Отсекать GPL на поиске значит выбрасывать лучшее.
@@ -67,15 +73,21 @@ NL-запрос → `Intent` (схема в `SCHEMAS.md` §2). Модель из
 
 ### Пример: «нужен парсер PDF-таблиц на Python»
 
+Дата сборки — 2026-09-03; от неё считается окно `pushed:` в `q7`.
+
 ```
-q1 exact    pdf table extraction language:python archived:false            best-match  30
-q2 synonym  extract tables from pdf language:python archived:false         best-match  30
-q3 topic    topic:pdf topic:table-extraction archived:false                stars       30
-q4 library  camelot OR tabula OR pdfplumber OR unstructured in:name,description  stars  30
-q5 readme   "pdf table parser" in:readme language:python                   best-match  30
-q6 broad    pdf tables language:python stars:>50                           stars       30
-q7 recent   pdf table extraction language:python pushed:>2025-03-12        updated     30
+q1 exact    pdf table extraction language:python archived:false                     best-match 30
+q2 synonym  extract tables from pdf language:python archived:false                  best-match 30
+q3 topic    topic:pdf topic:table-extraction archived:false                         stars      30
+q4 library  camelot OR tabula OR pdfplumber OR unstructured in:name,description     stars      30
+q5 readme   "pdf table parser" in:readme language:python archived:false             best-match 30
+q6 broad    pdf table language:python stars:>50 archived:false                      stars      30
+q7 recent   pdf table extraction language:python pushed:>2025-03-12 archived:false  updated    30
 ```
+
+Блок не написан от руки — он снят с вывода генератора, и тест
+`test_queries_md_example_block_matches_generator` читает его прямо отсюда и сверяет
+с кодом. Разойтись молча, как это дважды случилось раньше, пример больше не может.
 
 7 запросов × 1 страница = 7 HTTP-вызовов, троттлинг 2 с между ними ≈ 14 с.
 До 210 результатов до дедупа.

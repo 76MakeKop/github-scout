@@ -1,0 +1,56 @@
+{
+  "request_id": "6f1f1b9c-0000-4000-8000-000000000001",
+  "generated_at": "2026-09-03T12:00:00Z",
+  "generator_version": "qg-1",
+  "queries": [
+    {
+      "id": "q1",
+      "family": "exact",
+      "q": "pdf table extraction language:python archived:false",
+      "sort": "best-match",
+      "per_page": 30
+    },
+    {
+      "id": "q2",
+      "family": "synonym",
+      "q": "extract tables from pdf language:python archived:false",
+      "sort": "best-match",
+      "per_page": 30
+    },
+    {
+      "id": "q3",
+      "family": "topic",
+      "q": "topic:pdf topic:table-extraction archived:false",
+      "sort": "stars",
+      "per_page": 30
+    },
+    {
+      "id": "q4",
+      "family": "library",
+      "q": "camelot OR tabula OR pdfplumber OR unstructured in:name,description",
+      "sort": "stars",
+      "per_page": 30
+    },
+    {
+      "id": "q5",
+      "family": "readme",
+      "q": "\"pdf table parser\" in:readme language:python archived:false",
+      "sort": "best-match",
+      "per_page": 30
+    },
+    {
+      "id": "q6",
+      "family": "broad",
+      "q": "pdf table language:python stars:>50 archived:false",
+      "sort": "stars",
+      "per_page": 30
+    },
+    {
+      "id": "q7",
+      "family": "recent",
+      "q": "pdf table extraction language:python pushed:>2025-03-12 archived:false",
+      "sort": "updated",
+      "per_page": 30
+    }
+  ]
+}

@@ -6,3 +6,4 @@ __pycache__/
 .env
 eval/
 *.sqlite3
+.DS_Store
