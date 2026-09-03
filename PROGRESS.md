@@ -8,37 +8,20 @@
 
 ## Сделано
 
-### Неделя 1, день 1 — каркас (коммит `4720b84`)
+### Дни 1–2 — каркас, схемы, клиент GitHub (`4720b84`, `7895e13`)
 
-- Пакет `scout`, `pyproject.toml`, установка через `pip install -e ".[dev]"`.
-- CLI на argparse: `scan` с пятью флагами, `cache list` / `cache drop` — заглушки.
-- `config.py`: лимиты 10/50/10/5, peak-часы 01:00–04:00 и 06:00–10:00 UTC,
-  `PROMPT_VERSIONS`, ленивое чтение ключей.
-- `log.py`: JSON-строки `ts / level / run_id / event` в stderr.
-- `schemas.py`: все 9 контрактов `SCHEMAS.md` §1–9 как Pydantic-модели, `extra="forbid"`.
-- `tests/test_schemas.py`: 20 тестов, валидный и невалидный объект на каждый тип.
+Пакет `scout`, CLI на argparse, `config.py` (лимиты 10/50/10/5, peak-часы),
+`log.py` (JSON-строки в stderr), `schemas.py` (все 9 контрактов `SCHEMAS.md`,
+`extra="forbid"`), `http.py` + `github.py` со всей таблицей ошибок из
+`ARCHITECTURE.md`: `Retry-After`, вторичный лимит 1/4/16 с с джиттером,
+троттлинг поиска 2 с, обрезка дерева до 300 путей. 39 тестов.
 
-### Неделя 1, день 2 — клиент GitHub (коммит `7895e13`)
+### Дни 2–3 — извлечение интента (`36ab6f1`)
 
-- `http.py`: транспорт на `urllib`, подменяемый в тестах. Новых зависимостей нет.
-- `github.py`: `search_repositories`, `get_repo`, `get_tree`, `get_file`, `get_head_sha`.
-  Вся таблица ошибок из `ARCHITECTURE.md`: `Retry-After`, `X-RateLimit-Reset`,
-  вторичный лимит 1/4/16 с с джиттером, троттлинг поиска 2 с, потолок 10 запросов
-  на скан, обрезка дерева до 300 путей.
-- `tests/test_github.py`: 19 тестов на подменённом транспорте, без сети и без пауз.
-- Проверен вживую на боевом API (без токена, только чтение).
-
-### Неделя 1, дни 2–3 — извлечение интента (коммит `36ab6f1`)
-
-- `deepseek.py`: `chat_json` с `response_format=json_object`, `temperature=0`,
-  бэкофф 1/4/16 с на 429 и 5xx, ленивое чтение ключа.
-- `intent.py`: `extract_intent` → обёртка `IntentExtraction`
-  (`status="ok"|"failed"`). Один повтор с текстом ошибки валидации, затем провал.
-  Поля `request_id`, `model`, `prompt_version` проставляет код, а не модель.
-- `prompts/intent/v1.md`: системный промпт, три эталонных примера.
-- `tests/test_intent.py`: 14 тестов — валидный, невалидный с повтором, 5xx, 429,
-  отсутствие ключа, загрузка промпта.
-- Интеграция в CLI: событие `intent_extracted` с `synonyms_count` и `hypothesis_count`.
+`deepseek.py` (`chat_json`, `response_format=json_object`, бэкофф 1/4/16 с),
+`intent.py` (`extract_intent` → обёртка `IntentExtraction`, один повтор
+с текстом ошибки валидации), промпт `prompts/intent/v1.md`. Поля `request_id`,
+`model`, `prompt_version` проставляет код, а не модель. 14 тестов.
 
 ### Неделя 1, день 3 — генератор запросов
 
