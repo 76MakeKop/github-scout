@@ -1,0 +1,143 @@
+"""Клиент DeepSeek API.
+
+Ключ читается лениво — в момент вызова, а не при импорте: CLAUDE.md требует,
+чтобы отсутствие ключей не мешало дойти до места, где они реально нужны.
+
+Подсчёта стоимости здесь нет: по ROADMAP.md это день 7.
+"""
+
+import json
+import random
+import time
+from collections.abc import Callable
+from typing import Any
+
+from scout import config
+from scout.http import DEFAULT_TIMEOUT, Transport, urllib_transport
+from scout.log import RunLogger
+
+API_URL = "https://api.deepseek.com/chat/completions"
+BACKOFF_SECONDS = (1.0, 4.0, 16.0)
+
+
+class DeepSeekError(RuntimeError):
+    """Ответ DeepSeek, который не лечится повтором."""
+
+
+class DeepSeekUnavailable(DeepSeekError):
+    """Сервис не ответил за отведённые попытки — повод для fallback на Qwen."""
+
+
+def _jitter(base: float) -> float:
+    return base * random.uniform(0.8, 1.2)
+
+
+def strip_code_fence(text: str) -> str:
+    """Модели любят оборачивать JSON в ```json ... ``` даже в режиме json_object."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    without_open = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+    return without_open.rsplit("```", 1)[0].strip()
+
+
+class DeepSeekClient:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        transport: Transport = urllib_transport,
+        logger: RunLogger | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        self._api_key = api_key
+        self._transport = transport
+        self._log = logger
+        self._sleep = sleep
+        self._timeout = timeout
+        self.calls = 0
+
+    def _key(self) -> str:
+        """Ленивое разрешение ключа: без него падаем здесь, а не на старте CLI."""
+        return self._api_key or config.deepseek_api_key()
+
+    def chat_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        model: str = "deepseek-v4-flash",
+        temperature: float = 0.0,
+    ) -> tuple[dict[str, Any], dict[str, int]]:
+        """Возвращает разобранный JSON-ответ и счётчики токенов."""
+        payload = json.dumps(
+            {
+                "model": model,
+                "temperature": temperature,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+        ).encode()
+
+        headers = {
+            "Authorization": f"Bearer {self._key()}",
+            "Content-Type": "application/json",
+            "User-Agent": "github-scout/0.1",
+        }
+
+        attempt = 0
+        while True:
+            response = self._transport("POST", API_URL, headers, payload, self._timeout)
+            self.calls += 1
+
+            if response.status == 200:
+                break
+
+            retryable = response.status == 429 or 500 <= response.status < 600
+            if retryable and attempt < len(BACKOFF_SECONDS):
+                delay = _jitter(BACKOFF_SECONDS[attempt])
+                attempt += 1
+                if self._log:
+                    self._log.info(
+                        "deepseek_retry",
+                        status=response.status,
+                        attempt=attempt,
+                        wait_seconds=round(delay, 1),
+                    )
+                self._sleep(delay)
+                continue
+
+            if retryable:
+                raise DeepSeekUnavailable(
+                    f"DeepSeek отдаёт {response.status} после {len(BACKOFF_SECONDS)} повторов"
+                )
+            raise DeepSeekError(f"{response.status} от DeepSeek: {response.text()[:200]}")
+
+        body = response.json()
+        try:
+            content = body["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise DeepSeekError(f"неожиданная форма ответа DeepSeek: {exc}") from exc
+
+        usage = body.get("usage") or {}
+        counters = {
+            "input_tokens": int(usage.get("prompt_tokens", 0)),
+            "output_tokens": int(usage.get("completion_tokens", 0)),
+            "cached_input_tokens": int(
+                usage.get("prompt_cache_hit_tokens") or usage.get("prompt_tokens_cached") or 0
+            ),
+        }
+
+        try:
+            parsed = json.loads(strip_code_fence(content))
+        except json.JSONDecodeError as exc:
+            raise DeepSeekError(f"модель вернула не-JSON: {exc}") from exc
+
+        if not isinstance(parsed, dict):
+            raise DeepSeekError(f"ожидался JSON-объект, получен {type(parsed).__name__}")
+
+        return parsed, counters

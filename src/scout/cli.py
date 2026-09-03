@@ -1,6 +1,6 @@
-"""CLI. День 1: конвейер доходит до заглушки интента и останавливается.
+"""CLI. Конвейер доходит до извлечённого интента и останавливается.
 
-Ни сети, ни LLM, ни SQLite здесь нет — по ROADMAP.md это дни 2 и 6.
+Генерации запросов, поиска и слоёв здесь ещё нет — следующие пункты ROADMAP.md.
 """
 
 import argparse
@@ -11,6 +11,9 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from scout import config
+from scout.config import MissingCredential
+from scout.deepseek import DeepSeekError
+from scout.intent import extract_intent
 from scout.log import RunLogger, new_run_id
 from scout.schemas import ScanOptions, ScanRequest
 
@@ -96,12 +99,37 @@ def cmd_scan(args: argparse.Namespace) -> int:
         pricing_window="peak" if config.is_peak() else "off-peak",
     )
 
+    try:
+        extraction = extract_intent(request.query_text, request_id=request.request_id, logger=log)
+    except MissingCredential as exc:
+        log.error("missing_credential", detail=str(exc))
+        print(f"Не хватает ключа: {exc}", file=sys.stderr)
+        return 3
+    except DeepSeekError as exc:
+        log.error("deepseek_failed", detail=str(exc))
+        print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
+        return 4
+
+    if extraction.status == "failed":
+        log.error("intent_failed", attempts=extraction.attempts, problems=extraction.errors)
+        print(
+            "Не удалось разобрать задачу: модель дважды вернула невалидный ответ.", file=sys.stderr
+        )
+        return 5
+
+    intent = extraction.intent
     log.info(
-        "reached_stub",
-        stage="intent",
-        note="intent: stub",
-        prompt_version=config.PROMPT_VERSIONS["intent"],
+        "intent_extracted",
+        synonyms_count=len(intent.synonyms),
+        hypothesis_count=len(intent.known_libraries),
+        task=intent.task,
+        languages=intent.languages,
+        attempts=extraction.attempts,
+        prompt_version=intent.prompt_version,
+        **extraction.usage,
     )
+
+    log.info("reached_stub", stage="queries", note="генерация запросов: следующий пункт плана")
     return 0
 
 
