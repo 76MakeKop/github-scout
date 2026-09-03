@@ -6,6 +6,7 @@
 
 import json
 import sys
+import threading
 from datetime import UTC, datetime
 from typing import Any, TextIO
 from uuid import uuid4
@@ -20,6 +21,7 @@ class RunLogger:
     def __init__(self, run_id: str, stream: TextIO | None = None) -> None:
         self.run_id = run_id
         self._stream = stream if stream is not None else sys.stderr
+        self._lock = threading.Lock()
 
     def emit(self, event: str, level: str = "info", **fields: Any) -> None:
         record = {
@@ -29,8 +31,12 @@ class RunLogger:
             "event": event,
             **fields,
         }
-        self._stream.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-        self._stream.flush()
+        line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+        # Слой 1 пишет из пяти потоков сразу. Без замка строки могут переслоиться
+        # посередине, и лог перестанет разбираться построчно — а он машинный.
+        with self._lock:
+            self._stream.write(line)
+            self._stream.flush()
 
     def info(self, event: str, **fields: Any) -> None:
         self.emit(event, level="info", **fields)

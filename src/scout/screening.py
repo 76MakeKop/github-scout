@@ -8,6 +8,11 @@
 префиксом каждого сообщения и попадает в cache hit, а невалидный ответ по одному
 репозиторию стоит одного повтора, а не пересборки всего списка.
 
+Кандидаты разбираются пулом из `SCREENING_WORKERS` потоков. Последовательный
+разбор давал ~16 с на репозиторий и ~13 минут на полсотни — против цели
+«полный цикл ≤ 5 минут» (`CLAUDE.md`). Порядок результатов от этого не зависит:
+`map` отдаёт их в порядке входа, а `passed` всё равно пересчитывается сортировкой.
+
 Код не доверяет модели там, где решение принадлежит коду:
 
 - `repo_id`, `full_name`, `evidence` проставляются из `Candidate`, что бы модель
@@ -20,6 +25,7 @@
 """
 
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -49,6 +55,11 @@ MAX_README_CHARS = 4000
 
 MAX_ATTEMPTS = 2  # первая попытка + один повтор с текстом ошибки
 README_PATH = "README.md"
+
+SCREENING_WORKERS = 5
+"""Одновременных разборов кандидата. Больше пяти брать незачем: упор придёт не
+в DeepSeek, а в `core`-лимит GitHub на чтение README, и рост параллелизма начнёт
+грозить вторичным лимитом (`decisions_log.md`, 2026-09-04)."""
 
 # Эти три поля модель не заполняет — их проставляет код.
 _CODE_OWNED_FIELDS = ("repo_id", "full_name", "evidence")
@@ -181,13 +192,18 @@ def _screen_one(
     system: str,
     client: DeepSeekClient,
     github: GitHubClient,
-    totals: dict[str, int],
     logger: RunLogger | None,
-) -> ScreeningItem | None:
-    """Один кандидат: README, вызов модели, один повтор при невалидном ответе."""
+) -> tuple[ScreeningItem | None, dict[str, int]]:
+    """Один кандидат: README, вызов модели, один повтор при невалидном ответе.
+
+    Счётчики токенов возвращаются, а не пишутся в общий словарь: функция работает
+    в потоке пула, и складывать в разделяемый словарь пришлось бы под замком.
+    Токены засчитываются и за неразобранного кандидата — они потрачены.
+    """
     retrieved_at = datetime.now(UTC)
     readme = _readme(github, candidate, logger=logger)
     user = _user_message(intent, candidate, readme)
+    totals: dict[str, int] = {}
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         payload, counters = client.chat_json(
@@ -200,7 +216,8 @@ def _screen_one(
             totals[key] = totals.get(key, 0) + value
 
         try:
-            return _assemble(payload, candidate, has_readme=bool(readme), retrieved_at=retrieved_at)
+            item = _assemble(payload, candidate, has_readme=bool(readme), retrieved_at=retrieved_at)
+            return item, totals
         except ValidationError as exc:
             problems = _format_errors(exc)
             if logger:
@@ -215,7 +232,7 @@ def _screen_one(
                     logger.error(
                         "screening_failed", full_name=candidate.full_name, problems=problems
                     )
-                return None
+                return None, totals
             user = (
                 f"{user}\n\n"
                 "Предыдущий ответ не прошёл валидацию схемы:\n"
@@ -223,7 +240,7 @@ def _screen_one(
                 + "\nВерни исправленный JSON."
             )
 
-    return None
+    return None, totals
 
 
 def _passed(results: Sequence[ScreeningItem], limit: int) -> list[int]:
@@ -246,6 +263,7 @@ def screen(
     client: DeepSeekClient | None = None,
     logger: RunLogger | None = None,
     limit: int = config.MAX_AUDIT_CANDIDATES,
+    workers: int = SCREENING_WORKERS,
 ) -> ScreeningRun:
     """Кандидаты → `ScreeningResult` с пересчитанным кодом списком `passed`."""
     client = client or DeepSeekClient(logger=logger)
@@ -255,16 +273,27 @@ def screen(
     failed: list[str] = []
     totals: dict[str, int] = {}
 
-    for candidate in candidates:
-        item = _screen_one(
+    def work(candidate: Candidate) -> tuple[ScreeningItem | None, dict[str, int]]:
+        return _screen_one(
             candidate,
             intent=intent,
             system=system,
             client=client,
             github=github,
-            totals=totals,
             logger=logger,
         )
+
+    # `map` отдаёт результаты в порядке входа, а не завершения: кандидаты
+    # разбираются одновременно, но список остаётся тем же при любом раскладе
+    # задержек. Разбор идёт в потоках пула, склейка — здесь, в одном.
+    pool_size = max(1, min(workers, len(candidates) or 1))
+    with ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="l1") as pool:
+        outcomes = list(pool.map(work, candidates))
+
+    for candidate, (item, counters) in zip(candidates, outcomes, strict=True):
+        for key, value in counters.items():
+            totals[key] = totals.get(key, 0) + value
+
         if item is None:
             failed.append(candidate.full_name)
             continue

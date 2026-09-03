@@ -5,13 +5,20 @@
 `provenance`, версия промпта.
 """
 
+import threading
+import time
 from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
 
 from scout.schemas import Candidate, ModelName, ScreeningVerdict
-from scout.screening import MAX_README_CHARS, load_system_prompt, screen
+from scout.screening import (
+    MAX_README_CHARS,
+    SCREENING_WORKERS,
+    load_system_prompt,
+    screen,
+)
 from test_queries import make_intent
 
 REQUEST_ID = UUID("6f1f1b9c-0000-4000-8000-000000000001")
@@ -214,6 +221,100 @@ def test_passed_cap_is_the_audit_limit():
     deepseek = FakeDeepSeek([answer(relevance=0.9) for _ in range(20)])
 
     assert len(run(candidates, deepseek=deepseek, limit=3).result.passed) == 3
+
+
+# --------------------------------------------------------------------------
+# Параллельный разбор (decisions_log.md, 2026-09-04)
+# --------------------------------------------------------------------------
+
+
+class SlowDeepSeek:
+    """Отвечает с задержкой и считает, сколько вызовов шло одновременно.
+
+    Задержка убывает от кандидата к кандидату: при сборке «по мере готовности»
+    порядок результатов перевернулся бы, и тест на детерминизм это поймал бы.
+    """
+
+    def __init__(self, delay=0.05, relevances=None):
+        self.delay = delay
+        self.relevances = list(relevances or [])
+        self.calls = 0
+        self.running = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+    def chat_json(self, *, system, user, model, temperature=0.0):
+        with self._lock:
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+            index = self.calls
+            self.calls += 1
+
+        time.sleep(self.delay * (len(self.relevances) - index) if self.relevances else self.delay)
+
+        with self._lock:
+            self.running -= 1
+
+        relevance = self.relevances[index] if self.relevances else 0.8
+        return answer(relevance=relevance), {
+            "input_tokens": 1500,
+            "output_tokens": 120,
+            "cached_input_tokens": 1200,
+        }
+
+
+def test_candidates_are_screened_in_parallel():
+    """Десять кандидатов по 0,1 с последовательно заняли бы секунду."""
+    candidates = [candidate(n) for n in range(1, 11)]
+    deepseek = SlowDeepSeek(delay=0.1)
+
+    started = time.monotonic()
+    run(candidates, deepseek=deepseek)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.6
+    assert deepseek.calls == 10
+
+
+def test_pool_never_exceeds_five_at_once():
+    """Потолок в пять потоков: выше упор придёт в core-лимит GitHub на README."""
+    candidates = [candidate(n) for n in range(1, 21)]
+    deepseek = SlowDeepSeek(delay=0.02)
+
+    run(candidates, deepseek=deepseek)
+
+    assert deepseek.peak == SCREENING_WORKERS
+
+
+def test_result_order_follows_input_not_completion():
+    """Самый медленный кандидат идёт первым и обязан остаться первым в results."""
+    candidates = [candidate(n) for n in range(1, 6)]
+    deepseek = SlowDeepSeek(delay=0.02, relevances=[0.1, 0.2, 0.3, 0.4, 0.5])
+
+    result = run(candidates, deepseek=deepseek).result
+
+    assert [item.repo_id for item in result.results] == [1, 2, 3, 4, 5]
+    assert [item.relevance for item in result.results] == [0.1, 0.2, 0.3, 0.4, 0.5]
+    assert result.passed == [5, 4, 3, 2, 1]
+
+
+def test_parallel_run_sums_tokens_without_losing_any():
+    """Счётчики складываются в один поток после пула — гонки за словарь нет."""
+    candidates = [candidate(n) for n in range(1, 11)]
+    deepseek = SlowDeepSeek(delay=0.01)
+
+    usage = run(candidates, deepseek=deepseek).result.token_usage
+
+    assert usage.input_tokens == 15_000
+    assert usage.output_tokens == 1_200
+
+
+def test_single_worker_still_works():
+    """Пул в один поток — та же последовательная работа, что была раньше."""
+    candidates = [candidate(1), candidate(2)]
+    deepseek = FakeDeepSeek([answer(relevance=0.3), answer(relevance=0.9)])
+
+    assert run(candidates, deepseek=deepseek, workers=1).result.passed == [2, 1]
 
 
 # --------------------------------------------------------------------------

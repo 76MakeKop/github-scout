@@ -8,6 +8,7 @@
 
 import json
 import random
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -62,6 +63,9 @@ class DeepSeekClient:
         self._sleep = sleep
         self._timeout = timeout
         self.calls = 0
+        # Слой 1 держит один клиент на пять потоков: `+=` на счётчике
+        # не атомарен, и без замка часть вызовов терялась бы в учёте.
+        self._counter_lock = threading.Lock()
 
     def _key(self) -> str:
         """Ленивое разрешение ключа: без него падаем здесь, а не на старте CLI."""
@@ -117,7 +121,8 @@ class DeepSeekClient:
                 self._sleep(delay)
                 continue
 
-            self.calls += 1
+            with self._counter_lock:
+                self.calls += 1
 
             if response.status == 200:
                 break
