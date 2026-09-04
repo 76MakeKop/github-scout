@@ -103,6 +103,11 @@ QUERY_GENERATOR_VERSION = "qg-1"
 
 PEAK_WINDOWS_UTC = ((1, 4), (6, 10))
 
+PEAK_WEEKDAYS = frozenset(range(5))
+"""Пн–Пт по `datetime.weekday()`. Прайс DeepSeek ограничивает peak буднями,
+и без этой проверки выходные считались бы вдвое дороже, чем их выставит
+провайдер (`decisions_log.md`, 2026-09-04)."""
+
 # --------------------------------------------------------------------------
 # Fallback Слоя 2 (ARCHITECTURE.md → «Обработка ошибок»)
 # --------------------------------------------------------------------------
@@ -117,10 +122,18 @@ OPENROUTER_FALLBACK_MODEL = "qwen/qwen3.8-max"
 
 
 def is_peak(moment: datetime | None = None) -> bool:
-    """Peak: 01:00–04:00 и 06:00–10:00 UTC. Считается строго по UTC."""
-    moment = moment or datetime.now(UTC)
-    hour = moment.astimezone(UTC).hour
-    return any(start <= hour < end for start, end in PEAK_WINDOWS_UTC)
+    """Peak: 01:00–04:00 и 06:00–10:00 UTC по будням. Считается строго по UTC.
+
+    День недели берётся тоже по UTC, а не по местному времени: в Актобе (UTC+5)
+    суббота начинается в 19:00 пятницы, и без приведения к UTC граница выходных
+    сдвинулась бы на пять часов.
+    """
+    moment = (moment or datetime.now(UTC)).astimezone(UTC)
+
+    if moment.weekday() not in PEAK_WEEKDAYS:
+        return False
+
+    return any(start <= moment.hour < end for start, end in PEAK_WINDOWS_UTC)
 
 
 # --------------------------------------------------------------------------

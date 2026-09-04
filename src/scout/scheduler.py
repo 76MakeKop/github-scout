@@ -54,6 +54,11 @@ def next_offpeak_start(moment: datetime | None = None) -> datetime:
     """
     moment = (moment or datetime.now(UTC)).astimezone(UTC)
 
+    # Через `is_peak`, а не по одним часам: выходные тарифицируются дёшево целиком,
+    # и суббота в 02:00 не должна ждать четырёх утра.
+    if not config.is_peak(moment):
+        return moment
+
     for start, end in config.PEAK_WINDOWS_UTC:
         if start <= moment.hour < end:
             return moment.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=end)

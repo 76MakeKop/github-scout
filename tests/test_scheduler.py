@@ -56,6 +56,14 @@ def test_gap_between_peak_windows_is_offpeak():
     assert next_offpeak_start(moment) == moment
 
 
+def test_weekend_never_waits():
+    """Суббота 02:00 попадает в окно по часам, но выходные и так off-peak —
+    откладывать задачу значило бы ждать двух часов даром."""
+    saturday = datetime(2026, 9, 5, 2, 0, tzinfo=UTC)
+    assert saturday.weekday() == 5
+    assert next_offpeak_start(saturday) == saturday
+
+
 # --------------------------------------------------------------------------
 # Очередь
 # --------------------------------------------------------------------------

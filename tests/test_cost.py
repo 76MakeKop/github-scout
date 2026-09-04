@@ -190,3 +190,44 @@ def test_peak_is_counted_in_utc_not_local_time():
     """Полночь по Актобе (UTC+5) — это 19:00 UTC предыдущего дня, off-peak."""
     local_midnight = datetime(2026, 9, 4, 19, 0, tzinfo=UTC)
     assert config.is_peak(local_midnight) is False
+
+
+# --------------------------------------------------------------------------
+# Peak только по будням (прайс DeepSeek: Monday through Friday)
+# --------------------------------------------------------------------------
+
+FRIDAY = datetime(2026, 9, 4, 2, 0, tzinfo=UTC)
+SATURDAY = datetime(2026, 9, 5, 2, 0, tzinfo=UTC)
+SUNDAY = datetime(2026, 9, 6, 7, 0, tzinfo=UTC)
+MONDAY = datetime(2026, 9, 7, 7, 0, tzinfo=UTC)
+
+
+def test_friday_peak_hour_is_peak():
+    assert FRIDAY.weekday() == 4
+    assert config.is_peak(FRIDAY) is True
+
+
+def test_saturday_peak_hour_is_offpeak():
+    """Суббота 02:00 UTC попадает в окно по часам, но выходные тарифицируются дёшево."""
+    assert SATURDAY.weekday() == 5
+    assert config.is_peak(SATURDAY) is False
+
+
+def test_sunday_peak_hour_is_offpeak():
+    assert SUNDAY.weekday() == 6
+    assert config.is_peak(SUNDAY) is False
+
+
+def test_monday_peak_hour_is_peak():
+    assert MONDAY.weekday() == 0
+    assert config.is_peak(MONDAY) is True
+
+
+def test_weekend_call_is_priced_at_offpeak():
+    """Цена, а не только флаг: без проверки дня недели счёт вырос бы вдвое."""
+    weekend = token_usage(ModelName.FLASH, {"input_tokens": 1000}, moment=SATURDAY)
+    weekday = token_usage(ModelName.FLASH, {"input_tokens": 1000}, moment=FRIDAY)
+
+    assert weekend.pricing_window is PricingWindow.OFF_PEAK
+    assert weekday.pricing_window is PricingWindow.PEAK
+    assert weekday.cost_usd == pytest.approx(weekend.cost_usd * 2)
