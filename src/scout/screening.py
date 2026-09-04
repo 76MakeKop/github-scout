@@ -34,9 +34,10 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from scout import config
+from scout.config import MissingCredential
 from scout.cost import token_usage
-from scout.deepseek import DeepSeekClient
-from scout.github import GitHubClient, GitHubError
+from scout.deepseek import DeepSeekAuth, DeepSeekClient
+from scout.github import GitHubAuth, GitHubClient, GitHubError
 from scout.log import RunLogger
 from scout.schemas import (
     Candidate,
@@ -101,6 +102,8 @@ def _readme(
     """
     try:
         text = github.get_file(candidate.full_name, README_PATH, ref=candidate.head_sha)
+    except GitHubAuth:
+        raise
     except GitHubError as exc:
         text = None
         if logger:
@@ -193,16 +196,61 @@ def _screen_one(
     github: GitHubClient,
     logger: RunLogger | None,
 ) -> tuple[ScreeningItem | None, dict[str, int]]:
+    """Разбор одного кандидата, из которого исключение наружу не выходит.
+
+    Слой 1 идёт пулом потоков, и `map` поднимает исключение потока в вызывающем
+    коде: любая неожиданная поломка на одном кандидате из пятидесяти уронила бы
+    весь скан. Цена дня 8 — «сбой одного кандидата стоит одного кандидата»,
+    поэтому здесь ловится всё, а не только предвиденное.
+
+    Два исключения не глушатся намеренно: отсутствующий и отклонённый ключ.
+    Они одинаковы для всех пятидесяти кандидатов, и молчаливый провал каждого
+    выглядел бы как «модель не справилась», хотя чинить надо `.env`.
+    """
+    totals: dict[str, int] = {}
+    try:
+        return _screen_candidate(
+            candidate,
+            intent=intent,
+            system=system,
+            client=client,
+            github=github,
+            logger=logger,
+            totals=totals,
+        )
+    except (MissingCredential, DeepSeekAuth, GitHubAuth):
+        raise
+    except Exception as exc:  # ловим всё: живучесть пула важнее точности типа
+        if logger:
+            logger.error(
+                "screening_crash",
+                full_name=candidate.full_name,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        return None, totals
+
+
+def _screen_candidate(
+    candidate: Candidate,
+    *,
+    intent: Intent,
+    system: str,
+    client: DeepSeekClient,
+    github: GitHubClient,
+    logger: RunLogger | None,
+    totals: dict[str, int],
+) -> tuple[ScreeningItem | None, dict[str, int]]:
     """Один кандидат: README, вызов модели, один повтор при невалидном ответе.
 
-    Счётчики токенов возвращаются, а не пишутся в общий словарь: функция работает
-    в потоке пула, и складывать в разделяемый словарь пришлось бы под замком.
-    Токены засчитываются и за неразобранного кандидата — они потрачены.
+    Счётчики токенов копятся в переданном словаре, а не в общем на все потоки:
+    функция работает в потоке пула, и разделяемый словарь пришлось бы держать
+    под замком. Словарь приходит снаружи, чтобы токены, потраченные до поломки,
+    не терялись вместе с кандидатом — они уже оплачены.
     """
     retrieved_at = datetime.now(UTC)
     readme = _readme(github, candidate, logger=logger)
     user = _user_message(intent, candidate, readme)
-    totals: dict[str, int] = {}
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         payload, counters = client.chat_json(

@@ -462,6 +462,10 @@ class Report(SchemaModel):
     )
     rationale: Text1000 | None = None
     candidates: Annotated[list[ReportCandidate], Field(max_length=5)]
+    partial: bool = Field(
+        default=False,
+        description="часть данных потеряна из-за сбоя: сеть, лимит, неразобранный ответ",
+    )
     dropped: list[DroppedCandidate] = Field(default_factory=list)
     queries_used: list[str] = Field(
         default_factory=list,

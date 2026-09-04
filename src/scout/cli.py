@@ -1,6 +1,22 @@
 """CLI. Конвейер доходит до конца Слоя 1 и останавливается перед аудитом.
 
 Слоя 2, кэша и отчёта здесь ещё нет — следующие пункты ROADMAP.md.
+
+Коды возврата. Ноль означает «ответ получен», даже если он неполный: скан,
+потерявший двух кандидатов из пятидесяти, полезен, и заставлять вызывающий
+скрипт считать это провалом незачем. Ненулевые коды различают, что именно
+сломалось, — по ним видно, чинить конфигурацию, ждать сервис или править запрос:
+
+| Код | Что произошло |
+|---|---|
+| 0 | результат есть: полный, частичный (`partial`) или обоснованный BUILD |
+| 1 | скан не дал ничего: сервис не ответил или упал неожиданный сбой |
+| 2 | запрос не проходит схему `ScanRequest` |
+| 3 | ошибка конфигурации: ключа нет либо он отклонён (401/403) |
+| 4 | DeepSeek недоступен после всех повторов |
+| 5 | модель дважды вернула интент не по схеме |
+| 6 | из интента не собрался ни один поисковый запрос |
+| 7 | GitHub отказал так, что поиск не состоялся |
 """
 
 import argparse
@@ -14,13 +30,15 @@ from scout import config
 from scout.cache import DEFAULT_CACHE_PATH, AuditCache
 from scout.config import MissingCredential
 from scout.cost import token_usage
-from scout.deepseek import DeepSeekError
-from scout.github import GitHubClient, GitHubError
+from scout.deepseek import DeepSeekAuth, DeepSeekError
+from scout.github import GitHubAuth, GitHubClient, GitHubError
 from scout.intent import extract_intent
 from scout.log import RunLogger, new_run_id
 from scout.queries import QueryGenerationError, build_query_set
 from scout.scheduler import DEFAULT_QUEUE_PATH, PendingScans, next_offpeak_start
 from scout.schemas import (
+    DroppedCandidate,
+    DropStage,
     ModelName,
     PricingWindow,
     ScanOptions,
@@ -182,10 +200,8 @@ def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
 
     try:
         extraction = extract_intent(request.query_text, request_id=request.request_id, logger=log)
-    except MissingCredential as exc:
-        log.error("missing_credential", detail=str(exc))
-        print(f"Не хватает ключа: {exc}", file=sys.stderr)
-        return 3
+    except (MissingCredential, DeepSeekAuth) as exc:
+        return _credential_error(log, exc)
     except DeepSeekError as exc:
         log.error("deepseek_failed", detail=str(exc))
         print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
@@ -229,9 +245,7 @@ def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
     try:
         github = GitHubClient(token=config.github_token(), logger=log)
     except MissingCredential as exc:
-        log.error("missing_credential", detail=str(exc))
-        print(f"Не хватает ключа: {exc}", file=sys.stderr)
-        return 3
+        return _credential_error(log, exc)
 
     try:
         found = collect_candidates(
@@ -241,15 +255,26 @@ def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
             limit=request.options.max_candidates,
             logger=log,
         )
+    except GitHubAuth as exc:
+        return _credential_error(log, exc)
     except GitHubError as exc:
         log.error("search_failed_hard", detail=str(exc))
         print(f"Поиск по GitHub не удался: {exc}", file=sys.stderr)
         return 7
 
     if not found.candidates:
-        log.info("scan_build_recommended", reason="no_candidates", queries=found.queries_used)
+        # Пустой поиск — это ответ, а не сбой: подходящего решения не нашлось,
+        # и BUILD здесь обоснован (ARCHITECTURE.md, последняя строка таблицы).
+        # Сбой отличается от него флагом `partial`, а не кодом возврата.
+        log.info(
+            "scan_build_recommended",
+            reason="no_candidates",
+            queries=found.queries_used,
+            partial=found.partial,
+        )
         print(BUILD_ADVICE)
-        print(f"Проверено запросов: {len(found.queries_used)}.")
+        _print_queries(found.queries_used)
+        _print_degradation(found.partial, found.dropped)
         return 0
 
     log.info("reached_stub", stage="screening", note="Слой 1: скрининг кандидатов")
@@ -263,14 +288,22 @@ def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
             logger=log,
             limit=request.options.audit_limit,
         )
-    except MissingCredential as exc:
-        log.error("missing_credential", detail=str(exc))
-        print(f"Не хватает ключа: {exc}", file=sys.stderr)
-        return 3
+    except (MissingCredential, DeepSeekAuth, GitHubAuth) as exc:
+        return _credential_error(log, exc)
     except DeepSeekError as exc:
         log.error("deepseek_failed", detail=str(exc))
         print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
         return 4
+
+    dropped = found.dropped + [
+        DroppedCandidate(
+            full_name=full_name,
+            stage=DropStage.SCREENING,
+            reason="ответ модели дважды не прошёл схему",
+        )
+        for full_name in screening.failed
+    ]
+    partial = found.partial or bool(screening.failed)
 
     usage = screening.result.token_usage
     log.info(
@@ -293,17 +326,66 @@ def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
         pricing_window=usage.pricing_window.value,
     )
 
+    log.info(
+        "scan_finished",
+        partial=partial,
+        passed=len(screening.result.passed),
+        dropped=[item.model_dump(mode="json") for item in dropped],
+    )
+
     if not screening.result.passed:
-        log.info("scan_build_recommended", reason="none_passed", screened=len(found.candidates))
+        log.info(
+            "scan_build_recommended",
+            reason="none_passed",
+            screened=len(found.candidates),
+            queries=found.queries_used,
+            partial=partial,
+        )
         print("Ни один кандидат не прошёл скрининг — рекомендация BUILD.")
+        _print_queries(found.queries_used)
+        _print_degradation(partial, dropped)
         _print_cost(intent_usage, usage, total_cost)
         return 0
 
     _print_passed(screening, len(found.candidates))
+    _print_degradation(partial, dropped)
     _print_cost(intent_usage, usage, total_cost)
 
     log.info("reached_stub", stage="audit", note="Слой 2: следующий пункт плана")
     return 0
+
+
+def _credential_error(log: RunLogger, exc: Exception) -> int:
+    """Ключа нет или он отклонён — чинится в `.env`, повторять нечего."""
+    log.error("credential_rejected", error_type=type(exc).__name__, detail=str(exc))
+    print(f"Ошибка конфигурации: {exc}", file=sys.stderr)
+    return 3
+
+
+def _print_queries(queries: list[str]) -> None:
+    """Список проверенных запросов при рекомендации BUILD.
+
+    Без него BUILD выглядит как «ничего не нашлось», хотя обычно означает
+    «искали вот так и не нашлось» — а это проверяемое утверждение.
+    """
+    print(f"Проверено запросов: {len(queries)}.")
+    for query in queries:
+        print(f"  - {query}")
+
+
+def _print_degradation(partial: bool, dropped: list[DroppedCandidate]) -> None:
+    """Что скан потерял по дороге. Молчать об этом нельзя: неполный результат,
+    выданный как полный, — худший из возможных ответов."""
+    if not dropped and not partial:
+        return
+
+    if partial:
+        print("\n⚠ Результат неполный: часть данных потеряна из-за сбоев (partial).")
+
+    if dropped:
+        print(f"Выбыло кандидатов: {len(dropped)}")
+        for item in dropped:
+            print(f"  - {item.full_name} ({item.stage.value}): {item.reason}")
 
 
 def _print_cost(intent_usage: TokenUsage, screening_usage: TokenUsage, total: float) -> None:
@@ -382,9 +464,20 @@ def cmd_worker(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Последняя застава: наружу выходит код возврата, а не traceback.
+
+    Ниже по конвейеру каждый предвиденный отказ уже разобран и получил свой код.
+    Этот `except` — про непредвиденное: он не лечит, а переводит падение
+    в понятное сообщение и код 1, оставляя разбор в логе.
+    """
     args = build_parser().parse_args(argv)
-    if args.command == "scan":
-        return cmd_scan(args)
-    if args.command == "worker":
-        return cmd_worker(args)
-    return cmd_cache(args)
+    try:
+        if args.command == "scan":
+            return cmd_scan(args)
+        if args.command == "worker":
+            return cmd_worker(args)
+        return cmd_cache(args)
+    except Exception as exc:  # ловим всё: traceback пользователю бесполезен
+        RunLogger(new_run_id()).error("scan_crashed", error_type=type(exc).__name__, error=str(exc))
+        print(f"Скан прерван: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1

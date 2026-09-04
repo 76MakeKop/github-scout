@@ -130,16 +130,35 @@ Peak — 01:00–04:00 и 06:00–10:00 UTC **по будням**; выходн�
 
 ## Обработка ошибок
 
-| Ситуация | Поведение |
-|---|---|
-| GitHub 403/429 | читать `Retry-After` / `X-RateLimit-Reset`, ждать до сброса, до 3 попыток |
-| Secondary rate limit | экспоненциальный backoff с джиттером: 1с, 4с, 16с, затем отказ |
-| Search API: лимит 1000 результатов | не пагинировать глубже 1 страницы (30 шт.) на запрос |
-| Search API: 30 req/min | не более 10 поисковых запросов на скан, троттлинг 2с между ними |
-| DeepSeek 5xx / таймаут | 3 повтора; затем Слой 2 переключается на `qwen3.8-max` |
-| Ответ модели не проходит валидацию схемы | 1 повтор с приложенной ошибкой валидации; затем кандидат помечается `status: "failed"` и не попадает в отчёт |
-| Репозиторий удалён / приватен между поиском и аудитом | кандидат выбывает, в отчёте строка `dropped` |
-| Ни один кандидат не прошёл Слой 1 | отчёт с рекомендацией BUILD и списком проверенных запросов |
+Правило поверх таблицы: **сбой одного шага стоит одного шага, а не скана.**
+Потеря кандидата, выдачи или README не прерывает работу — она поднимает флаг
+`partial` в отчёте (`SCHEMAS.md` §8) и оставляет строку в `dropped`. Прерывается
+скан только там, где продолжать бессмысленно: отклонённый ключ, недоступный
+сервис, запрос, не прошедший схему.
+
+| Ситуация | Поведение | Проверено |
+|---|---|---|
+| GitHub 403/429 | читать `Retry-After` / `X-RateLimit-Reset`, ждать до сброса плюс 1 с буфера, до 3 попыток | `test_github.py::test_429_with_retry_after_waits_and_retries`, `::test_403_with_ratelimit_reset_waits_until_reset`, `::test_rate_limit_gives_up_after_three_attempts` |
+| Secondary rate limit | экспоненциальный backoff с джиттером: 1с, 4с, 16с, затем отказ | `test_github.py::test_secondary_rate_limit_backs_off_with_jitter`, `::test_secondary_rate_limit_gives_up_after_three_delays` |
+| GitHub 5xx | тот же backoff 1/4/16 с своим счётчиком попыток, затем `GitHubUnavailable` | `test_github.py::test_server_error_is_retried_then_raised` |
+| Обрыв связи / таймаут GitHub | то же, что 5xx: 3 повтора, затем `GitHubUnavailable` | `test_github.py::test_transport_error_is_retried_like_a_server_error`, `::test_permanent_transport_error_becomes_github_error` |
+| GitHub 401 или 403 «Bad credentials» | не повторять: ошибка конфигурации, наружу `GitHubAuth`, код возврата 3 | `test_github.py::test_401_is_a_credential_error_not_a_retry`, `test_errors.py::test_rejected_token_is_a_configuration_error` |
+| GitHub 404 / 451 | не повторять, вернуть `None`, событие `github_resource_missing` | `test_github.py::test_missing_repo_returns_none`, `::test_451_is_treated_like_a_missing_repo` |
+| Search API: лимит 1000 результатов | не пагинировать глубже 1 страницы (30 шт.) на запрос | `test_github.py::test_per_page_is_capped_at_thirty` |
+| Search API: 30 req/min | не более 10 поисковых запросов на скан, троттлинг 2с между ними | `test_github.py::test_search_quota_is_enforced`, `::test_second_search_is_throttled` |
+| Одна выдача не получена | ранжируем остальные, скан помечается `partial` | `test_search.py::test_failed_query_marks_run_partial_and_keeps_the_rest` |
+| DeepSeek 5xx / таймаут | 3 повтора; затем Слой 2 переключается на `qwen3.8-max` (день 14) | `test_intent.py::test_server_error_retries_three_times_then_raises`, `::test_timeout_is_retried_like_a_server_error` |
+| DeepSeek 429 | ждать `Retry-After`, если он назван, иначе backoff 1/4/16 | `test_intent.py::test_429_is_retried` |
+| DeepSeek 401/403 | не повторять: ошибка конфигурации, наружу `DeepSeekAuth`, код возврата 3 | `test_errors.py::test_rejected_key_is_not_swallowed_by_the_pool` |
+| Ответ модели не проходит валидацию схемы | 1 повтор с приложенной ошибкой валидации; затем кандидат помечается `status: "failed"`, не попадает в отчёт, скан становится `partial` | `test_screen.py::test_invalid_answer_is_retried_once_with_the_validation_error`, `::test_candidate_failing_twice_is_marked_failed_and_excluded`, `test_errors.py::test_failed_screening_makes_the_run_partial` |
+| Непредвиденный сбой на кандидате Слоя 1 | ловится, пишется `screening_crash`, кандидат выбывает; пул продолжает работу | `test_errors.py::test_crash_on_one_candidate_does_not_kill_the_pool` |
+| Репозиторий удалён / приватен между поиском и аудитом | кандидат выбывает, в отчёте строка `dropped`; `partial` при этом **не** поднимается | `test_search.py::test_deleted_repo_becomes_a_dropped_row_not_a_partial_run` |
+| Ни один кандидат не прошёл Слой 1 | отчёт с рекомендацией BUILD и списком проверенных запросов | `test_errors.py::test_build_recommendation_lists_the_queries_it_checked` |
+| Что угодно непредвиденное выше по стеку | код возврата 1 и одна строка в stderr вместо traceback | `test_errors.py::test_unexpected_crash_becomes_exit_one_not_a_traceback` |
+
+Отклонённый ключ — единственное исключение из правила «сбой не выходит за пределы
+шага»: он одинаков для всех пятидесяти кандидатов, и проглотить его пятьдесят раз
+значит выдать пустой скан там, где чинится одна строка в `.env`.
 
 **Идемпотентность.** Одинаковый текст запроса даёт одинаковый результат при неизменных
 `head_sha` кандидатов. Обеспечивается: `temperature = 0` на всех вызовах,

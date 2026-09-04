@@ -14,7 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from scout import config
-from scout.http import HttpError, Transport, urllib_transport
+from scout.http import HttpError, HttpResponse, Transport, urllib_transport
 from scout.log import RunLogger
 
 API_URL = "https://api.deepseek.com/chat/completions"
@@ -34,8 +34,27 @@ class DeepSeekUnavailable(DeepSeekError):
     """Сервис не ответил за отведённые попытки — повод для fallback на Qwen."""
 
 
+class DeepSeekAuth(DeepSeekError):
+    """Ключ отклонён (401 или 403) — ошибка конфигурации, а не сбой сервиса.
+
+    Повторять нечего: пока ключ тот же, ответ будет тот же. Живой прогон дня 5
+    начинался ровно с этого — ключ с мусорным хвостом давал 401.
+    """
+
+
 def _jitter(base: float) -> float:
     return base * random.uniform(0.8, 1.2)
+
+
+def _retry_after(response: HttpResponse) -> float | None:
+    """Пауза, названная сервером в `Retry-After`. None — заголовка нет."""
+    raw = response.header("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return None
 
 
 def strip_code_fence(text: str) -> str:
@@ -127,9 +146,16 @@ class DeepSeekClient:
             if response.status == 200:
                 break
 
+            if response.status in (401, 403):
+                raise DeepSeekAuth(
+                    f"DeepSeek отклонил ключ ({response.status}): проверьте DEEPSEEK_API_KEY в .env"
+                )
+
             retryable = response.status == 429 or 500 <= response.status < 600
             if retryable and attempt < len(BACKOFF_SECONDS):
-                delay = _jitter(BACKOFF_SECONDS[attempt])
+                # Названная сервером пауза важнее нашей лесенки: при 429 DeepSeek
+                # знает, когда окно откроется, а мы только гадаем.
+                delay = _retry_after(response) or _jitter(BACKOFF_SECONDS[attempt])
                 attempt += 1
                 if self._log:
                     self._log.info(

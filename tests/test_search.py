@@ -9,8 +9,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from scout.github import GitHubError, RateLimitExhausted
+from scout.github import GitHubAuth, GitHubError, GitHubUnavailable, RateLimitExhausted
 from scout.queries import build_query_set
+from scout.schemas import DropStage
 from scout.search import MIN_UNIQUE_CANDIDATES, collect_candidates
 from test_queries import make_intent
 from test_rank import repo
@@ -173,6 +174,107 @@ def test_exhausted_rate_limit_stops_further_searches():
 def test_successful_run_is_not_partial():
     github = FakeGitHub(default_page=[repo(n) for n in range(1, 13)])
     assert collect(github).partial is False
+
+
+def test_rejected_token_is_not_hidden_behind_partial():
+    """GitHubAuth одинаков для всех семи запросов: скан обязан упасть, а не сдать
+    пустой результат «частично»."""
+    queries = [query.q for query in query_set().queries]
+    github = FakeGitHub(
+        default_page=[repo(1)],
+        fail={queries[0]: GitHubAuth("GitHub отклонил токен (401)")},
+    )
+
+    with pytest.raises(GitHubAuth):
+        collect(github)
+
+
+# --------------------------------------------------------------------------
+# Выбывшие кандидаты: строки `dropped` в отчёте (ARCHITECTURE.md)
+# --------------------------------------------------------------------------
+
+
+def test_deleted_repo_becomes_a_dropped_row_not_a_partial_run():
+    """Репозиторий исчез между поиском и сборкой — результат от этого не неполон.
+
+    Мы получили всё, что существовало на момент запроса; кандидата больше нет
+    в природе, и честный отчёт говорит об этом строкой, а не флагом сбоя.
+    """
+    github = FakeGitHub(
+        default_page=[repo(n) for n in range(1, 13)],
+        head_shas={f"owner{n}/repo{n}": "b" * 40 for n in range(2, 13)},
+    )
+
+    outcome = collect(github)
+
+    assert outcome.partial is False
+    assert [item.full_name for item in outcome.dropped] == ["owner1/repo1"]
+    assert outcome.dropped[0].stage is DropStage.SEARCH
+    assert outcome.dropped[0].reason == "head_sha_missing"
+
+
+def test_github_error_on_head_sha_drops_the_candidate_and_marks_partial():
+    """А вот отказ GitHub — уже сбой: репозиторий, возможно, жив, данных нет."""
+
+    class FailingHeadSha(FakeGitHub):
+        def get_head_sha(self, full_name, branch):
+            if full_name == "owner1/repo1":
+                raise GitHubUnavailable("GitHub недоступен после 3 повторов")
+            return super().get_head_sha(full_name, branch)
+
+    github = FailingHeadSha(default_page=[repo(n) for n in range(1, 13)])
+    outcome = collect(github)
+
+    assert outcome.partial is True
+    assert len(outcome.candidates) == 11
+    assert outcome.dropped[0].full_name == "owner1/repo1"
+    assert outcome.dropped[0].reason.startswith("head_sha_error")
+
+
+def test_dropped_rows_fit_the_report_contract():
+    """`DroppedCandidate.reason` ограничен 200 символами — длинная ошибка обрежется."""
+
+    class ChattyFailure(FakeGitHub):
+        def get_head_sha(self, full_name, branch):
+            raise GitHubUnavailable("подробности отказа " * 40)
+
+    outcome = collect(ChattyFailure(default_page=[repo(1), repo(2)]))
+
+    assert outcome.dropped
+    assert all(len(item.reason) <= 200 for item in outcome.dropped)
+
+
+# --------------------------------------------------------------------------
+# Идемпотентность (ROADMAP.md, день 8)
+# --------------------------------------------------------------------------
+
+
+def test_two_runs_on_the_same_data_give_the_same_candidates():
+    """Одинаковый вход при неизменном `now` обязан дать тот же список в том же порядке."""
+    page = [repo(n) for n in range(1, 15)]
+
+    first = collect(FakeGitHub(default_page=list(page)))
+    second = collect(FakeGitHub(default_page=list(page)))
+
+    assert [(c.repo_id, c.rank) for c in first.candidates] == [
+        (c.repo_id, c.rank) for c in second.candidates
+    ]
+
+
+def test_order_of_query_results_does_not_change_the_outcome():
+    """Порядок словаря выдач — деталь исполнения, а не вход ранжирования.
+
+    Если бы он влиял, повтор скана давал бы другую десятку на дорогой Слой 2
+    просто из-за того, в каком порядке ответил GitHub.
+    """
+    queries = [query.q for query in query_set().queries]
+    pages = {q: [repo(n) for n in range(1, 15)] for q in queries}
+
+    straight = collect(FakeGitHub(pages=pages))
+    reversed_pages = dict(reversed(list(pages.items())))
+    shuffled = collect(FakeGitHub(pages=reversed_pages))
+
+    assert [c.repo_id for c in straight.candidates] == [c.repo_id for c in shuffled.candidates]
 
 
 # --------------------------------------------------------------------------

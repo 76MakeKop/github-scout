@@ -308,6 +308,28 @@ def test_report_valid():
     assert report.dropped == []
 
 
+def test_report_is_complete_unless_told_otherwise():
+    """`partial` по умолчанию False: неполноту нужно заявить, а не забыть снять."""
+    assert Report(**REPORT_OK).partial is False
+
+
+def test_partial_report_carries_the_flag_and_the_dropped_rows():
+    report = Report(
+        **REPORT_OK,
+        partial=True,
+        dropped=[
+            {
+                "full_name": "gone/repo",
+                "stage": "search",
+                "reason": "head_sha_missing",
+            }
+        ],
+    )
+
+    assert report.partial is True
+    assert report.dropped[0].stage.value == "search"
+
+
 def test_report_invalid_rank_out_of_range():
     broken = {**REPORT_OK}
     broken["candidates"] = [{**REPORT_OK["candidates"][0], "rank": 6}]
