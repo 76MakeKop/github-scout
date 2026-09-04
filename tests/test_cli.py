@@ -8,6 +8,7 @@
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,8 @@ from scout import cli, config
 from scout.github import GitHubError
 from scout.intent import IntentExtraction
 from scout.queries import QueryGenerationError
-from scout.schemas import ModelName, PricingWindow, ScreeningResult, TokenUsage
+from scout.scheduler import PendingScans
+from scout.schemas import ModelName, PricingWindow, ScanOptions, ScreeningResult, TokenUsage
 from scout.screening import ScreeningRun
 from scout.search import SearchOutcome
 
@@ -76,9 +78,14 @@ def ok_intent(monkeypatch):
 
 
 @pytest.fixture
-def offline(monkeypatch):
-    """Поиск и скрининг без сети: два кандидата, оба прошли."""
+def offline(monkeypatch, tmp_path):
+    """Поиск и скрининг без сети: два кандидата, оба прошли.
+
+    Очередь отложенных сканов тоже уводится во временный файл: `scan` разгребает
+    её на старте, и без подмены тесты писали бы в базу проекта.
+    """
     monkeypatch.setenv("GITHUB_TOKEN", "ghp-fake")
+    monkeypatch.setattr(cli, "DEFAULT_QUEUE_PATH", tmp_path / "pending.sqlite3")
 
     def fake_collect(query_set, *, intent, github, limit, logger=None, **kwargs):
         return SearchOutcome(
@@ -168,8 +175,143 @@ def test_screening_totals_reach_the_log(ok_intent, offline, capsys):
 
     done = events(capsys)["screening_done"]
     assert done["passed"] == 2
-    assert done["input_tokens"] == 7500
+    assert done["token_usage"]["input_tokens"] == 7500
     assert done["prompt_version"] == "l1-1"
+
+
+def test_scan_prints_and_logs_the_total_cost(ok_intent, offline, capsys):
+    """Критерий приёмки дня 7: цена видна и в логе, и в конце отчёта."""
+    cli.main(["scan", QUERY])
+
+    captured = capsys.readouterr()
+    assert "total_cost_usd" in captured.out
+
+    events_by_name = {
+        record["event"]: record
+        for line in captured.err.splitlines()
+        if (record := _maybe_json(line))
+    }
+    cost = events_by_name["scan_cost"]
+    assert cost["total_cost_usd"] == pytest.approx(
+        cost["intent_usd"] + cost["screening_usd"], rel=1e-6
+    )
+    assert cost["total_cost_usd"] > 0
+
+
+def _maybe_json(line):
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError:
+        return None
+
+
+# --------------------------------------------------------------------------
+# Режим --off-peak
+# --------------------------------------------------------------------------
+
+
+class FrozenClock:
+    """Подменяет `datetime.now` в модуле CLI — время очереди должно быть управляемым."""
+
+    def __init__(self, moment):
+        self.moment = moment
+
+    def now(self, tz=None):
+        return self.moment
+
+
+def freeze(monkeypatch, moment):
+    monkeypatch.setattr(cli, "datetime", FrozenClock(moment))
+
+
+PEAK_MOMENT = datetime(2026, 9, 4, 2, 0, tzinfo=UTC)
+OFFPEAK_MOMENT = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+
+
+def test_offpeak_flag_defers_execution_during_peak(ok_intent, offline, monkeypatch, capsys):
+    """02:00 UTC плюс флаг — задача уходит в очередь, скан не выполняется."""
+    freeze(monkeypatch, PEAK_MOMENT)
+
+    assert cli.main(["scan", QUERY, "--off-peak"]) == 0
+
+    captured = capsys.readouterr()
+    assert "Задача в очереди" in captured.out
+    assert "04:00 UTC" in captured.out
+    assert "Слой 1" not in captured.out
+
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        pending = queue.all()
+    assert len(pending) == 1
+    assert pending[0].query == QUERY
+    assert pending[0].scheduled_at == datetime(2026, 9, 4, 4, 0, tzinfo=UTC)
+
+
+def test_offpeak_flag_runs_immediately_outside_peak(ok_intent, offline, monkeypatch, capsys):
+    """12:00 UTC уже дёшево — ждать нечего, скан идёт сразу."""
+    freeze(monkeypatch, OFFPEAK_MOMENT)
+
+    assert cli.main(["scan", QUERY, "--off-peak"]) == 0
+
+    assert "Слой 1" in capsys.readouterr().out
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        assert queue.all() == []
+
+
+def test_scan_without_the_flag_runs_during_peak(ok_intent, offline, monkeypatch, capsys):
+    """CLAUDE.md, запрет 8: без явного флага откладывать нельзя даже в пик."""
+    freeze(monkeypatch, PEAK_MOMENT)
+
+    assert cli.main(["scan", QUERY]) == 0
+    assert "Слой 1" in capsys.readouterr().out
+
+
+def test_worker_executes_a_task_whose_time_has_come(ok_intent, offline, monkeypatch, capsys):
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        queue.add(QUERY, ScanOptions(off_peak=True), scheduled_at=PEAK_MOMENT)
+
+    freeze(monkeypatch, datetime(2026, 9, 4, 4, 30, tzinfo=UTC))
+
+    assert cli.main(["worker", "run"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Выполняю отложенную задачу" in out
+    assert "Слой 1" in out
+
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        assert queue.all() == []
+
+
+def test_worker_leaves_a_task_whose_time_has_not_come(ok_intent, offline, monkeypatch, capsys):
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        queue.add(QUERY, ScanOptions(off_peak=True), scheduled_at=OFFPEAK_MOMENT)
+
+    freeze(monkeypatch, PEAK_MOMENT)
+
+    assert cli.main(["worker", "run"]) == 0
+    assert "ближайшая" in capsys.readouterr().out
+
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        assert len(queue.all()) == 1
+
+
+def test_worker_on_empty_queue_says_so(offline, capsys):
+    assert cli.main(["worker", "run"]) == 0
+    assert "Очередь пуста" in capsys.readouterr().out
+
+
+def test_scan_drains_the_queue_before_its_own_work(ok_intent, offline, monkeypatch, capsys):
+    """Демона нет: отложенная задача исполняется при следующем запуске CLI."""
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        queue.add("отложенная задача про PDF", ScanOptions(), scheduled_at=PEAK_MOMENT)
+
+    freeze(monkeypatch, OFFPEAK_MOMENT)
+
+    assert cli.main(["scan", QUERY]) == 0
+
+    out = capsys.readouterr().out
+    assert out.index("Выполняю отложенную задачу") < out.index("Слой 1")
+    with PendingScans(cli.DEFAULT_QUEUE_PATH) as queue:
+        assert queue.all() == []
 
 
 def test_empty_search_gives_build_recommendation_and_exit_zero(

@@ -34,6 +34,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from scout import config
+from scout.cost import token_usage
 from scout.deepseek import DeepSeekClient
 from scout.github import GitHubClient, GitHubError
 from scout.log import RunLogger
@@ -41,13 +42,11 @@ from scout.schemas import (
     Candidate,
     Intent,
     ModelName,
-    PricingWindow,
     Provenance,
     ProvenanceApi,
     ScreeningItem,
     ScreeningResult,
     ScreeningVerdict,
-    TokenUsage,
 )
 
 MAX_README_CHARS = 4000
@@ -268,6 +267,7 @@ def screen(
     """Кандидаты → `ScreeningResult` с пересчитанным кодом списком `passed`."""
     client = client or DeepSeekClient(logger=logger)
     system = load_system_prompt()
+    started_at = datetime.now(UTC)
 
     results: list[ScreeningItem] = []
     failed: list[str] = []
@@ -321,16 +321,10 @@ def screen(
         prompt_version=config.PROMPT_VERSIONS["l1"],
         results=results,
         passed=_passed(results, limit),
-        token_usage=TokenUsage(
-            model=ModelName.FLASH,
-            input_tokens=totals.get("input_tokens", 0),
-            cached_input_tokens=totals.get("cached_input_tokens", 0),
-            output_tokens=totals.get("output_tokens", 0),
-            # Подсчёт стоимости — день 7 ROADMAP.md. Поле обязательно по схеме,
-            # поэтому стоит ноль, а не выдуманное число.
-            cost_usd=0.0,
-            pricing_window=PricingWindow.PEAK if config.is_peak() else PricingWindow.OFF_PEAK,
-        ),
+        # Окно тарификации берётся по началу слоя, а не по каждому вызову:
+        # скрининг длится минуты и мог бы пересечь границу peak-часа посередине.
+        # Дробить счёт по вызовам ради этого незачем — разница меньше цены одного репо.
+        token_usage=token_usage(ModelName.FLASH, totals, moment=started_at),
     )
 
     return ScreeningRun(result=result, failed=failed)

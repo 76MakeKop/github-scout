@@ -13,12 +13,21 @@ from pydantic import ValidationError
 from scout import config
 from scout.cache import DEFAULT_CACHE_PATH, AuditCache
 from scout.config import MissingCredential
+from scout.cost import token_usage
 from scout.deepseek import DeepSeekError
 from scout.github import GitHubClient, GitHubError
 from scout.intent import extract_intent
 from scout.log import RunLogger, new_run_id
 from scout.queries import QueryGenerationError, build_query_set
-from scout.schemas import ScanOptions, ScanRequest, ScreeningItem
+from scout.scheduler import DEFAULT_QUEUE_PATH, PendingScans, next_offpeak_start
+from scout.schemas import (
+    ModelName,
+    PricingWindow,
+    ScanOptions,
+    ScanRequest,
+    ScreeningItem,
+    TokenUsage,
+)
 from scout.screening import ScreeningRun, screen
 from scout.search import collect_candidates
 
@@ -71,6 +80,10 @@ def build_parser() -> argparse.ArgumentParser:
     drop = cache_sub.add_parser("drop", help="удалить записи по репозиторию")
     drop.add_argument("repo_id", type=int, help="repo_id из GitHub")
 
+    worker = sub.add_parser("worker", help="выполнить отложенные сканы, чьё время пришло")
+    worker_sub = worker.add_subparsers(dest="worker_command", required=True)
+    worker_sub.add_parser("run", help="разгрести очередь --off-peak")
+
     return parser
 
 
@@ -98,6 +111,67 @@ def cmd_scan(args: argparse.Namespace) -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 2
 
+    # Момент берётся один раз и передаётся дальше: иначе очередь, тарификация
+    # и проверка peak-часа считали бы время каждая по своим часам.
+    now = datetime.now(UTC)
+
+    # Очередь разгребается перед своей работой: демона нет, и это единственный
+    # момент, когда отложенная задача может дождаться исполнения.
+    drain_pending(log, moment=now)
+
+    if request.options.off_peak and config.is_peak(now):
+        return _defer(request, log, now)
+
+    return _execute_scan(request, log)
+
+
+def _defer(request: ScanRequest, log: RunLogger, now: datetime) -> int:
+    """Сейчас peak и попросили подождать — ставим в очередь (CLAUDE.md, запрет 8)."""
+    starts_at = next_offpeak_start(now)
+
+    with PendingScans(DEFAULT_QUEUE_PATH) as queue:
+        task_id = queue.add(request.query_text, request.options, scheduled_at=starts_at)
+
+    log.info(
+        "scan_deferred",
+        task_id=task_id,
+        scheduled_at=starts_at.isoformat().replace("+00:00", "Z"),
+        reason="peak_hours",
+    )
+    print(
+        f"⏳ Задача в очереди. Запустится автоматически "
+        f"в {starts_at.strftime('%H:%M')} UTC — в off-peak вдвое дешевле."
+    )
+    print("   Разгрести очередь вручную: python -m scout worker run")
+    return 0
+
+
+def drain_pending(log: RunLogger, *, moment: datetime | None = None) -> int:
+    """Выполняет отложенные задачи, чьё время пришло. Возвращает их число."""
+    moment = moment or datetime.now(UTC)
+
+    with PendingScans(DEFAULT_QUEUE_PATH) as queue:
+        due = queue.due(moment)
+        if not due:
+            return 0
+
+        log.info("pending_scans_due", count=len(due))
+        for task in due:
+            print(f"▶ Выполняю отложенную задачу #{task.id}: «{task.query}»")
+            request = ScanRequest(
+                request_id=uuid4(),
+                query_text=task.query,
+                created_at=datetime.now(UTC),
+                # Флаг снят намеренно: время пришло, второй раз откладывать нечего.
+                options=task.options.model_copy(update={"off_peak": False}),
+            )
+            _execute_scan(request, log)
+            queue.remove(task.id)
+
+    return len(due)
+
+
+def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
     log.info(
         "start",
         request_id=str(request.request_id),
@@ -125,6 +199,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 5
 
     intent = extraction.intent
+    intent_usage = token_usage(ModelName.FLASH, extraction.usage)
     log.info(
         "intent_extracted",
         synonyms_count=len(intent.synonyms),
@@ -133,7 +208,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         languages=intent.languages,
         attempts=extraction.attempts,
         prompt_version=intent.prompt_version,
-        **extraction.usage,
+        token_usage=intent_usage.model_dump(mode="json"),
     )
 
     try:
@@ -203,21 +278,50 @@ def cmd_scan(args: argparse.Namespace) -> int:
         screened=len(screening.result.results),
         passed=len(screening.result.passed),
         failed=len(screening.failed),
-        input_tokens=usage.input_tokens,
-        cached_input_tokens=usage.cached_input_tokens,
-        output_tokens=usage.output_tokens,
         prompt_version=screening.result.prompt_version,
+        token_usage=usage.model_dump(mode="json"),
+    )
+
+    # Слоя 2 нет, поэтому сумма пока из двух этапов. `Report.cost_usd` заполнится
+    # ею же, когда отчёт появится (день 14).
+    total_cost = intent_usage.cost_usd + usage.cost_usd
+    log.info(
+        "scan_cost",
+        intent_usd=round(intent_usage.cost_usd, 6),
+        screening_usd=round(usage.cost_usd, 6),
+        total_cost_usd=round(total_cost, 6),
+        pricing_window=usage.pricing_window.value,
     )
 
     if not screening.result.passed:
         log.info("scan_build_recommended", reason="none_passed", screened=len(found.candidates))
         print("Ни один кандидат не прошёл скрининг — рекомендация BUILD.")
+        _print_cost(intent_usage, usage, total_cost)
         return 0
 
     _print_passed(screening, len(found.candidates))
+    _print_cost(intent_usage, usage, total_cost)
 
     log.info("reached_stub", stage="audit", note="Слой 2: следующий пункт плана")
     return 0
+
+
+def _print_cost(intent_usage: TokenUsage, screening_usage: TokenUsage, total: float) -> None:
+    """Стоимость по этапам. Слой 2 появится на дне 11 и добавит сюда свою строку."""
+    window = "peak" if screening_usage.pricing_window is PricingWindow.PEAK else "off-peak"
+
+    print(f"\nСтоимость скана ({window}):")
+    print(
+        f"  интент    {intent_usage.cost_usd:.6f} $"
+        f"   ({intent_usage.input_tokens} вход / {intent_usage.output_tokens} выход,"
+        f" {intent_usage.cached_input_tokens} из кэша)"
+    )
+    print(
+        f"  Слой 1    {screening_usage.cost_usd:.6f} $"
+        f"   ({screening_usage.input_tokens} вход / {screening_usage.output_tokens} выход,"
+        f" {screening_usage.cached_input_tokens} из кэша)"
+    )
+    print(f"  total_cost_usd {total:.6f} $")
 
 
 def _print_passed(screening: ScreeningRun, screened: int) -> None:
@@ -258,8 +362,29 @@ def cmd_cache(args: argparse.Namespace) -> int:
         return 0
 
 
+def cmd_worker(args: argparse.Namespace) -> int:
+    """Разгребает очередь `--off-peak`. Демона нет: воркер запускается руками
+    или заодно при следующем `scan`."""
+    log = RunLogger(new_run_id())
+    executed = drain_pending(log)
+
+    if not executed:
+        with PendingScans(DEFAULT_QUEUE_PATH) as queue:
+            waiting = queue.all()
+        if waiting:
+            nearest = min(task.scheduled_at for task in waiting)
+            print(
+                f"В очереди {len(waiting)} задач(и), ближайшая — в {nearest.strftime('%H:%M')} UTC."
+            )
+        else:
+            print("Очередь пуста.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "scan":
         return cmd_scan(args)
+    if args.command == "worker":
+        return cmd_worker(args)
     return cmd_cache(args)
