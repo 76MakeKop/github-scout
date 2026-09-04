@@ -22,6 +22,7 @@
 import argparse
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -29,25 +30,30 @@ from pydantic import ValidationError
 from scout import config
 from scout.cache import DEFAULT_CACHE_PATH, AuditCache
 from scout.config import MissingCredential
-from scout.cost import token_usage
 from scout.deepseek import DeepSeekAuth, DeepSeekError
-from scout.github import GitHubAuth, GitHubClient, GitHubError
-from scout.intent import extract_intent
+from scout.evaluate import (
+    DEFAULT_EVAL_DIR,
+    DEFAULT_GOLDEN_DIR,
+    EvalError,
+    EvalRun,
+    evaluate,
+    load_cases,
+    write_report,
+)
+from scout.github import GitHubAuth, GitHubError
 from scout.log import RunLogger, new_run_id
-from scout.queries import QueryGenerationError, build_query_set
+from scout.pipeline import IntentUnparsed, ScanStatus, run_scan
+from scout.queries import QueryGenerationError
 from scout.scheduler import DEFAULT_QUEUE_PATH, PendingScans, next_offpeak_start
 from scout.schemas import (
     DroppedCandidate,
-    DropStage,
-    ModelName,
     PricingWindow,
     ScanOptions,
     ScanRequest,
     ScreeningItem,
     TokenUsage,
 )
-from scout.screening import ScreeningRun, screen
-from scout.search import collect_candidates
+from scout.screening import ScreeningRun
 
 NOT_YET = "реализуется на неделе 2"
 
@@ -101,6 +107,36 @@ def build_parser() -> argparse.ArgumentParser:
     worker = sub.add_parser("worker", help="выполнить отложенные сканы, чьё время пришло")
     worker_sub = worker.add_subparsers(dest="worker_command", required=True)
     worker_sub.add_parser("run", help="разгрести очередь --off-peak")
+
+    evaluation = sub.add_parser("eval", help="прогнать golden-set и посчитать recall")
+    evaluation.add_argument(
+        "--golden",
+        default=str(DEFAULT_GOLDEN_DIR),
+        help=f"каталог с задачами (по умолчанию {DEFAULT_GOLDEN_DIR})",
+    )
+    evaluation.add_argument(
+        "--max-candidates",
+        type=int,
+        default=config.MAX_CANDIDATES,
+        help=f"кандидатов на Слой 1 в каждой задаче (по умолчанию {config.MAX_CANDIDATES})",
+    )
+    evaluation.add_argument(
+        "--audit-limit",
+        type=int,
+        default=config.MAX_AUDIT_CANDIDATES,
+        help="срез, по которому считается recall@10",
+    )
+    evaluation.add_argument(
+        "--limit", type=int, default=None, help="прогнать только первые N задач набора"
+    )
+    evaluation.add_argument(
+        "--out", default=str(DEFAULT_EVAL_DIR), help="куда положить JSON прогона"
+    )
+    evaluation.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="проверить набор и выйти: ни одного вызова модели, ни одного цента",
+    )
 
     return parser
 
@@ -190,166 +226,56 @@ def drain_pending(log: RunLogger, *, moment: datetime | None = None) -> int:
 
 
 def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
-    log.info(
-        "start",
-        request_id=str(request.request_id),
-        query_text=request.query_text,
-        options=request.options.model_dump(),
-        pricing_window="peak" if config.is_peak() else "off-peak",
-    )
+    """Один скан: конвейер в `pipeline.py`, здесь — печать и коды возврата.
 
+    Отказы разбираются тут, а не в конвейере: у оболочки и у прогона golden-set
+    на один и тот же отказ разные ответы — первой нужен код возврата, второму
+    строка в таблице результатов.
+    """
     try:
-        extraction = extract_intent(request.query_text, request_id=request.request_id, logger=log)
-    except (MissingCredential, DeepSeekAuth) as exc:
+        outcome = run_scan(request, log=log)
+    except (MissingCredential, DeepSeekAuth, GitHubAuth) as exc:
         return _credential_error(log, exc)
-    except DeepSeekError as exc:
-        log.error("deepseek_failed", detail=str(exc))
-        print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
-        return 4
-
-    if extraction.status == "failed":
-        log.error("intent_failed", attempts=extraction.attempts, problems=extraction.errors)
+    except IntentUnparsed:
         print(
             "Не удалось разобрать задачу: модель дважды вернула невалидный ответ.", file=sys.stderr
         )
         return 5
-
-    intent = extraction.intent
-    intent_usage = token_usage(ModelName.FLASH, extraction.usage)
-    log.info(
-        "intent_extracted",
-        synonyms_count=len(intent.synonyms),
-        hypothesis_count=len(intent.known_libraries),
-        task=intent.task,
-        languages=intent.languages,
-        attempts=extraction.attempts,
-        prompt_version=intent.prompt_version,
-        token_usage=intent_usage.model_dump(mode="json"),
-    )
-
-    try:
-        query_set = build_query_set(intent, logger=log)
+    except DeepSeekError as exc:
+        log.error("deepseek_failed", detail=str(exc))
+        print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
+        return 4
     except QueryGenerationError as exc:
         log.error("queries_failed", detail=str(exc))
         print(f"Не удалось собрать поисковые запросы: {exc}", file=sys.stderr)
         return 6
-
-    log.info(
-        "queries_generated",
-        query_count=len(query_set.queries),
-        generator_version=query_set.generator_version,
-        families=[query.family.value for query in query_set.queries],
-        queries=[query.q for query in query_set.queries],
-    )
-
-    try:
-        github = GitHubClient(token=config.github_token(), logger=log)
-    except MissingCredential as exc:
-        return _credential_error(log, exc)
-
-    try:
-        found = collect_candidates(
-            query_set,
-            intent=intent,
-            github=github,
-            limit=request.options.max_candidates,
-            logger=log,
-        )
-    except GitHubAuth as exc:
-        return _credential_error(log, exc)
     except GitHubError as exc:
         log.error("search_failed_hard", detail=str(exc))
         print(f"Поиск по GitHub не удался: {exc}", file=sys.stderr)
         return 7
 
-    if not found.candidates:
+    if outcome.status is ScanStatus.NO_CANDIDATES:
         # Пустой поиск — это ответ, а не сбой: подходящего решения не нашлось,
         # и BUILD здесь обоснован (ARCHITECTURE.md, последняя строка таблицы).
         # Сбой отличается от него флагом `partial`, а не кодом возврата.
-        log.info(
-            "scan_build_recommended",
-            reason="no_candidates",
-            queries=found.queries_used,
-            partial=found.partial,
-        )
         print(BUILD_ADVICE)
-        _print_queries(found.queries_used)
-        _print_degradation(found.partial, found.dropped)
+        _print_queries(outcome.queries_used)
+        _print_degradation(outcome.partial, outcome.dropped)
         return 0
 
-    log.info("reached_stub", stage="screening", note="Слой 1: скрининг кандидатов")
+    screening = outcome.screening
+    usage = outcome.screening_usage
 
-    try:
-        screening = screen(
-            found.candidates,
-            intent,
-            request_id=request.request_id,
-            github=github,
-            logger=log,
-            limit=request.options.audit_limit,
-        )
-    except (MissingCredential, DeepSeekAuth, GitHubAuth) as exc:
-        return _credential_error(log, exc)
-    except DeepSeekError as exc:
-        log.error("deepseek_failed", detail=str(exc))
-        print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
-        return 4
-
-    dropped = found.dropped + [
-        DroppedCandidate(
-            full_name=full_name,
-            stage=DropStage.SCREENING,
-            reason="ответ модели дважды не прошёл схему",
-        )
-        for full_name in screening.failed
-    ]
-    partial = found.partial or bool(screening.failed)
-
-    usage = screening.result.token_usage
-    log.info(
-        "screening_done",
-        screened=len(screening.result.results),
-        passed=len(screening.result.passed),
-        failed=len(screening.failed),
-        prompt_version=screening.result.prompt_version,
-        token_usage=usage.model_dump(mode="json"),
-    )
-
-    # Слоя 2 нет, поэтому сумма пока из двух этапов. `Report.cost_usd` заполнится
-    # ею же, когда отчёт появится (день 14).
-    total_cost = intent_usage.cost_usd + usage.cost_usd
-    log.info(
-        "scan_cost",
-        intent_usd=round(intent_usage.cost_usd, 6),
-        screening_usd=round(usage.cost_usd, 6),
-        total_cost_usd=round(total_cost, 6),
-        pricing_window=usage.pricing_window.value,
-    )
-
-    log.info(
-        "scan_finished",
-        partial=partial,
-        passed=len(screening.result.passed),
-        dropped=[item.model_dump(mode="json") for item in dropped],
-    )
-
-    if not screening.result.passed:
-        log.info(
-            "scan_build_recommended",
-            reason="none_passed",
-            screened=len(found.candidates),
-            queries=found.queries_used,
-            partial=partial,
-        )
+    if outcome.status is ScanStatus.NONE_PASSED:
         print("Ни один кандидат не прошёл скрининг — рекомендация BUILD.")
-        _print_queries(found.queries_used)
-        _print_degradation(partial, dropped)
-        _print_cost(intent_usage, usage, total_cost)
+        _print_queries(outcome.queries_used)
+        _print_degradation(outcome.partial, outcome.dropped)
+        _print_cost(outcome.intent_usage, usage, outcome.total_cost_usd)
         return 0
 
-    _print_passed(screening, len(found.candidates))
-    _print_degradation(partial, dropped)
-    _print_cost(intent_usage, usage, total_cost)
+    _print_passed(screening, len(outcome.candidates))
+    _print_degradation(outcome.partial, outcome.dropped)
+    _print_cost(outcome.intent_usage, usage, outcome.total_cost_usd)
 
     log.info("reached_stub", stage="audit", note="Слой 2: следующий пункт плана")
     return 0
@@ -463,6 +389,80 @@ def cmd_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_eval(args: argparse.Namespace) -> int:
+    """Прогон golden-set. `--dry-run` проверяет набор, не тратя ни цента."""
+    log = RunLogger(new_run_id())
+
+    try:
+        cases = load_cases(Path(args.golden))
+    except EvalError as exc:
+        log.error("golden_set_invalid", detail=str(exc))
+        print(f"Набор не читается: {exc}", file=sys.stderr)
+        return 2
+
+    if args.limit is not None:
+        cases = cases[: args.limit]
+
+    print(f"Задач в наборе: {len(cases)}")
+    for case in cases:
+        target = ", ".join(case.expected_repos) if case.expected_repos else "— (ловушка: BUILD)"
+        print(f"  {case.slug:24} {case.query_text}")
+        print(f"  {'':24} эталон: {target}")
+
+    if args.dry_run:
+        print("\nПроверка набора пройдена. Прогон не запускался (--dry-run).")
+        return 0
+
+    options = ScanOptions(max_candidates=args.max_candidates, audit_limit=args.audit_limit)
+    print(
+        f"\nПрогон: {len(cases)} задач × {options.max_candidates} кандидатов, "
+        f"recall@{options.audit_limit} после Слоя 1.\n"
+    )
+
+    try:
+        run = evaluate(cases, options=options, log=log)
+    except (MissingCredential, DeepSeekAuth, GitHubAuth) as exc:
+        return _credential_error(log, exc)
+    except DeepSeekError as exc:
+        log.error("deepseek_failed", detail=str(exc))
+        print(f"DeepSeek недоступен: {exc}", file=sys.stderr)
+        return 4
+    except GitHubError as exc:
+        log.error("search_failed_hard", detail=str(exc))
+        print(f"Поиск по GitHub не удался: {exc}", file=sys.stderr)
+        return 7
+
+    _print_eval(run, options)
+    path = write_report(run, Path(args.out))
+    print(f"\nПодробности прогона: {path}")
+    return 0
+
+
+def _print_eval(run: EvalRun, options: ScanOptions) -> None:
+    """Таблица по задачам и сводка. Оба среза recall — рядом: их разница и есть диагноз."""
+    print(f"{'задача':24} {'recall@' + str(options.audit_limit):>10} {'recall@50':>10}  статус")
+    for result in run.results:
+        if result.error:
+            print(f"{result.slug:24} {'—':>10} {'—':>10}  ошибка: {result.error}")
+            continue
+        flag = "  ⚠ partial" if result.partial else ""
+        print(
+            f"{result.slug:24} {result.recall_at_10:>10.2f} {result.recall_at_50:>10.2f}"
+            f"  {result.status}{flag}"
+        )
+
+    summary = run.summary()
+    verdict = "цель недели 2 взята" if summary["target_met"] else "ниже цели 0,60 — чинить поиск"
+    print(
+        f"\nrecall@{options.audit_limit}: {summary['recall_at_10']:.2f} — {verdict}"
+        f"\nrecall@50 (потолок поиска): {summary['recall_at_50']:.2f}"
+        f"\nЗадач измерено: {summary['cases_measured']} из {summary['cases_total']}"
+        f", ловушек {summary['traps']}, неполных прогонов {summary['partial_runs']}"
+        f"\nСтоимость: {summary['cost_usd_total']:.4f} $"
+        f", медиана времени задачи {summary['duration_sec_median']:.0f} с"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Последняя застава: наружу выходит код возврата, а не traceback.
 
@@ -476,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_scan(args)
         if args.command == "worker":
             return cmd_worker(args)
+        if args.command == "eval":
+            return cmd_eval(args)
         return cmd_cache(args)
     except Exception as exc:  # ловим всё: traceback пользователю бесполезен
         RunLogger(new_run_id()).error("scan_crashed", error_type=type(exc).__name__, error=str(exc))

@@ -264,6 +264,15 @@ class GitHubClient:
         self._event("github_search", q=q, sort=sort or "best-match", found=len(items))
         return items
 
+    def reset_search_budget(self) -> None:
+        """Новый скан — новые десять поисковых запросов (CLAUDE.md, запрет 5).
+
+        Нужно прогону golden-set: клиент там один на весь набор, а запрет
+        ограничивает скан, не набор. Троттлинг между вызовами не сбрасывается —
+        30 запросов в минуту это лимит GitHub, и он не знает про наши задачи.
+        """
+        self.search_calls = 0
+
     def get_repo(self, full_name: str) -> dict[str, Any] | None:
         """None — репозиторий удалён или стал приватным между поиском и аудитом."""
         return self._request(f"/repos/{full_name}", allow_404=True)

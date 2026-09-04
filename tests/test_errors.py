@@ -13,7 +13,7 @@
 import pytest
 
 from conftest import screening_run
-from scout import cli
+from scout import cli, pipeline
 from scout.config import MissingCredential
 from scout.deepseek import DeepSeekAuth
 from scout.github import GitHubAuth, GitHubUnavailable
@@ -142,7 +142,7 @@ def partial_search(**outcome_fields):
 
 def test_partial_scan_exits_zero_and_says_so(ok_intent, offline, monkeypatch, capsys):
     """Потеря части данных не отменяет ответ, но и не скрывается."""
-    monkeypatch.setattr(cli, "collect_candidates", partial_search(partial=True))
+    monkeypatch.setattr(pipeline, "collect_candidates", partial_search(partial=True))
 
     assert cli.main(["scan", QUERY]) == 0
 
@@ -150,7 +150,7 @@ def test_partial_scan_exits_zero_and_says_so(ok_intent, offline, monkeypatch, ca
 
 
 def test_partial_flag_reaches_the_log(ok_intent, offline, monkeypatch, capsys):
-    monkeypatch.setattr(cli, "collect_candidates", partial_search(partial=True))
+    monkeypatch.setattr(pipeline, "collect_candidates", partial_search(partial=True))
 
     cli.main(["scan", QUERY])
 
@@ -170,7 +170,7 @@ def test_failed_screening_makes_the_run_partial(ok_intent, offline, monkeypatch,
     def with_failure(candidates, intent, *, request_id, github, logger=None, limit=10, **kwargs):
         return screening_run(request_id, failed=["owner9/repo9"])
 
-    monkeypatch.setattr(cli, "screen", with_failure)
+    monkeypatch.setattr(pipeline, "screen", with_failure)
 
     assert cli.main(["scan", QUERY]) == 0
 
@@ -184,7 +184,7 @@ def test_dropped_candidates_are_shown_to_the_user(ok_intent, offline, monkeypatc
     def with_failure(candidates, intent, *, request_id, github, logger=None, limit=10, **kwargs):
         return screening_run(request_id, failed=["owner9/repo9"])
 
-    monkeypatch.setattr(cli, "screen", with_failure)
+    monkeypatch.setattr(pipeline, "screen", with_failure)
     cli.main(["scan", QUERY])
 
     out = capsys.readouterr().out
@@ -198,7 +198,7 @@ def test_rejected_token_is_a_configuration_error(ok_intent, offline, monkeypatch
     def explode(query_set, *, intent, github, limit, logger=None, **kwargs):
         raise GitHubAuth("GitHub отклонил токен (401): проверьте .env")
 
-    monkeypatch.setattr(cli, "collect_candidates", explode)
+    monkeypatch.setattr(pipeline, "collect_candidates", explode)
 
     assert cli.main(["scan", QUERY]) == 3
 
@@ -214,7 +214,7 @@ def test_unexpected_crash_becomes_exit_one_not_a_traceback(ok_intent, offline, m
     def explode(query_set, *, intent, github, limit, logger=None, **kwargs):
         raise ZeroDivisionError("деление на ноль в чужом коде")
 
-    monkeypatch.setattr(cli, "collect_candidates", explode)
+    monkeypatch.setattr(pipeline, "collect_candidates", explode)
 
     assert cli.main(["scan", QUERY]) == 1
 
@@ -229,7 +229,7 @@ def test_build_recommendation_lists_the_queries_it_checked(ok_intent, offline, m
     def none_passed(candidates, intent, *, request_id, github, logger=None, limit=10, **kwargs):
         return screening_run(request_id, passed=())
 
-    monkeypatch.setattr(cli, "screen", none_passed)
+    monkeypatch.setattr(pipeline, "screen", none_passed)
 
     assert cli.main(["scan", QUERY]) == 0
 

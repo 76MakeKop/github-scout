@@ -9,7 +9,7 @@
 
 import pytest
 
-from scout import cli
+from scout import cli, pipeline
 from scout.intent import IntentExtraction
 from scout.schemas import ModelName, PricingWindow, ScreeningResult, TokenUsage
 from scout.screening import ScreeningRun
@@ -63,7 +63,7 @@ def ok_intent(monkeypatch):
             usage={"input_tokens": 900, "output_tokens": 210},
         )
 
-    monkeypatch.setattr(cli, "extract_intent", fake_extract)
+    monkeypatch.setattr(pipeline, "extract_intent", fake_extract)
 
 
 @pytest.fixture
@@ -85,5 +85,5 @@ def offline(monkeypatch, tmp_path):
     def fake_screen(candidates, intent, *, request_id, github, logger=None, limit=10, **kwargs):
         return screening_run(request_id)
 
-    monkeypatch.setattr(cli, "collect_candidates", fake_collect)
-    monkeypatch.setattr(cli, "screen", fake_screen)
+    monkeypatch.setattr(pipeline, "collect_candidates", fake_collect)
+    monkeypatch.setattr(pipeline, "screen", fake_screen)

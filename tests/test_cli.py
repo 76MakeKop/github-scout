@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from conftest import screening_run
-from scout import cli, config
+from scout import cli, config, pipeline
 from scout.github import GitHubError
 from scout.intent import IntentExtraction
 from scout.queries import QueryGenerationError
@@ -251,7 +251,7 @@ def test_empty_search_gives_build_recommendation_and_exit_zero(
     def nothing_found(query_set, *, intent, github, limit, logger=None, **kwargs):
         return SearchOutcome(queries_used=[query.q for query in query_set.queries])
 
-    monkeypatch.setattr(cli, "collect_candidates", nothing_found)
+    monkeypatch.setattr(pipeline, "collect_candidates", nothing_found)
 
     assert cli.main(["scan", QUERY]) == 0
 
@@ -264,7 +264,7 @@ def test_nobody_passing_screening_also_gives_build(ok_intent, offline, monkeypat
     def none_passed(candidates, intent, *, request_id, github, logger=None, limit=10, **kwargs):
         return screening_run(request_id, passed=())
 
-    monkeypatch.setattr(cli, "screen", none_passed)
+    monkeypatch.setattr(pipeline, "screen", none_passed)
 
     assert cli.main(["scan", QUERY]) == 0
     assert "BUILD" in capsys.readouterr().out
@@ -274,7 +274,7 @@ def test_github_failure_has_its_own_exit_code(ok_intent, offline, monkeypatch, c
     def explode(query_set, *, intent, github, limit, logger=None, **kwargs):
         raise GitHubError("500 от GitHub")
 
-    monkeypatch.setattr(cli, "collect_candidates", explode)
+    monkeypatch.setattr(pipeline, "collect_candidates", explode)
 
     assert cli.main(["scan", QUERY]) == 7
     assert "search_failed_hard" in events(capsys)
@@ -291,7 +291,7 @@ def test_query_generation_failure_has_its_own_exit_code(ok_intent, monkeypatch, 
     def explode(intent, **kwargs):
         raise QueryGenerationError("из интента собралось 4 различимых запроса")
 
-    monkeypatch.setattr(cli, "build_query_set", explode)
+    monkeypatch.setattr(pipeline, "build_query_set", explode)
 
     assert cli.main(["scan", QUERY]) == 6
     assert "queries_failed" in events(capsys)
@@ -303,7 +303,7 @@ def test_intent_failure_does_not_reach_the_generator(monkeypatch, capsys):
     def failed_extract(task_text, *, request_id, client=None, logger=None):
         return IntentExtraction(status="failed", attempts=2, errors=["synonyms: too short"])
 
-    monkeypatch.setattr(cli, "extract_intent", failed_extract)
+    monkeypatch.setattr(pipeline, "extract_intent", failed_extract)
 
     assert cli.main(["scan", QUERY]) == 5
     assert "queries_generated" not in events(capsys)
@@ -387,3 +387,60 @@ def test_empty_value_does_not_shadow_a_missing_key(tmp_path, monkeypatch):
 
     with pytest.raises(config.MissingCredential):
         config.deepseek_api_key()
+
+
+# --------------------------------------------------------------------------
+# scout eval — прогон golden-set
+# --------------------------------------------------------------------------
+
+
+def golden_dir(tmp_path, count=3):
+    directory = tmp_path / "golden"
+    directory.mkdir()
+    for n in range(1, count + 1):
+        (directory / f"case{n}.json").write_text(
+            json.dumps(
+                {
+                    "query_text": f"нужен инструмент номер {n} для разбора данных",
+                    "expected_repos": [f"owner{n}/repo{n}"],
+                    "expected_verdict": "USE",
+                    "note": "тестовая задача",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    return directory
+
+
+def test_dry_run_checks_the_set_without_spending_anything(tmp_path, monkeypatch, capsys):
+    """Проверка набора обязана быть бесплатной: иначе опечатку в JSON
+    приходится ловить деньгами."""
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("--dry-run не должен запускать прогон")
+
+    monkeypatch.setattr(cli, "evaluate", must_not_run)
+
+    assert cli.main(["eval", "--golden", str(golden_dir(tmp_path)), "--dry-run"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Задач в наборе: 3" in out
+    assert "Прогон не запускался" in out
+
+
+def test_broken_set_stops_before_the_run(tmp_path, capsys):
+    directory = tmp_path / "golden"
+    directory.mkdir()
+    (directory / "broken.json").write_text("{не json", encoding="utf-8")
+
+    assert cli.main(["eval", "--golden", str(directory), "--dry-run"]) == 2
+    assert "Набор не читается" in capsys.readouterr().err
+
+
+def test_limit_cuts_the_set_for_a_pilot_run(tmp_path, capsys):
+    """Пилот гоняет первые N задач: дешёвая проверка харнесса перед полным набором."""
+    assert (
+        cli.main(["eval", "--golden", str(golden_dir(tmp_path)), "--limit", "2", "--dry-run"]) == 0
+    )
+    assert "Задач в наборе: 2" in capsys.readouterr().out

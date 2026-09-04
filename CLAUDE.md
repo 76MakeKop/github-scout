@@ -43,7 +43,9 @@ python -m scout scan "нужен парсер PDF-таблиц на Python"
 python -m scout scan "..." --max-candidates 50 --audit-limit 10 --off-peak
 python -m scout cache list
 python -m scout cache drop <repo_id>
-python -m scout eval --golden tests/golden/       # recall@5 на golden-set
+python -m scout eval --golden tests/golden/ --dry-run   # проверить набор, не тратя денег
+python -m scout eval --limit 8 --max-candidates 15      # пилот: дёшево проверить харнесс
+python -m scout eval --golden tests/golden/             # полный прогон: recall@10 и recall@50
 ```
 
 ## Жёсткие запреты
