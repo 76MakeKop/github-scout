@@ -14,7 +14,10 @@ recall@50 высокий, а recall@10 низкий — болит промпт 
 
 Задачи-ловушки (`expected_repos: []`) считаются наоборот: единица, если агент
 никого не пропустил дальше, и ноль, если пропустил. Пока Слоя 2 нет, «рекомендация
-BUILD» — это и есть пустой `passed`.
+BUILD» — это и есть пустой `passed`. В `recall@50` ловушка не участвует вовсе:
+там нечего искать, а поиск при этом обязан что-то вернуть — иначе Слою 1 нечего
+будет отвергать. Считать её и там значило бы наказывать поиск за правильную
+работу, и потолок оказывался бы ниже метрики, которую он ограничивает.
 """
 
 import json
@@ -78,7 +81,7 @@ class CaseResult:
     found: list[str] = field(default_factory=list)
     passed: list[str] = field(default_factory=list)
     recall_at_10: float = 0.0
-    recall_at_50: float = 0.0
+    recall_at_50: float | None = None
     cost_usd: float = 0.0
     duration_sec: float = 0.0
     partial: bool = False
@@ -93,7 +96,7 @@ class CaseResult:
             "found": self.found,
             "passed": self.passed,
             "recall_at_10": round(self.recall_at_10, 4),
-            "recall_at_50": round(self.recall_at_50, 4),
+            "recall_at_50": None if self.recall_at_50 is None else round(self.recall_at_50, 4),
             "cost_usd": round(self.cost_usd, 6),
             "duration_sec": round(self.duration_sec, 1),
             "partial": self.partial,
@@ -127,7 +130,9 @@ class EvalRun:
             "cases_failed": len(self.results) - len(measured),
             "traps": sum(1 for result in measured if not result.expected),
             "recall_at_10": _mean(result.recall_at_10 for result in measured),
-            "recall_at_50": _mean(result.recall_at_50 for result in measured),
+            "recall_at_50": _mean(
+                result.recall_at_50 for result in measured if result.recall_at_50 is not None
+            ),
             "target_met": _mean(result.recall_at_10 for result in measured) >= RECALL_TARGET,
             "cost_usd_total": round(sum(result.cost_usd for result in measured), 6),
             "duration_sec_median": round(statistics.median(durations), 1) if durations else 0.0,
@@ -239,7 +244,8 @@ def evaluate_case(
         found=found,
         passed=passed,
         recall_at_10=recall(case.expected_repos, passed),
-        recall_at_50=recall(case.expected_repos, found),
+        # У ловушки эталона нет: «нашёл ли поиск» — вопрос без предмета.
+        recall_at_50=None if case.is_trap else recall(case.expected_repos, found),
         cost_usd=outcome.total_cost_usd,
         duration_sec=outcome.duration_sec,
         partial=outcome.partial,

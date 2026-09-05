@@ -34,6 +34,17 @@ class DeepSeekUnavailable(DeepSeekError):
     """Сервис не ответил за отведённые попытки — повод для fallback на Qwen."""
 
 
+class DeepSeekBadResponse(DeepSeekError):
+    """Ответ пришёл, но это не разбираемый JSON-объект.
+
+    Отдельный тип, потому что лечится он не так, как остальные `DeepSeekError`:
+    это осечка генерации, а не поломка сервиса, и повтор того же запроса обычно
+    даёт нормальный ответ. Живой прогон golden-set 2026-09-05: модель вернула
+    пустую строку на одном кандидате из ста двадцати, и он выбыл насовсем,
+    хотя стоил одного повтора.
+    """
+
+
 class DeepSeekAuth(DeepSeekError):
     """Ключ отклонён (401 или 403) — ошибка конфигурации, а не сбой сервиса.
 
@@ -177,7 +188,7 @@ class DeepSeekClient:
         try:
             content = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise DeepSeekError(f"неожиданная форма ответа DeepSeek: {exc}") from exc
+            raise DeepSeekBadResponse(f"неожиданная форма ответа DeepSeek: {exc}") from exc
 
         usage = body.get("usage") or {}
         counters = {
@@ -191,9 +202,9 @@ class DeepSeekClient:
         try:
             parsed = json.loads(strip_code_fence(content))
         except json.JSONDecodeError as exc:
-            raise DeepSeekError(f"модель вернула не-JSON: {exc}") from exc
+            raise DeepSeekBadResponse(f"модель вернула не-JSON: {exc}") from exc
 
         if not isinstance(parsed, dict):
-            raise DeepSeekError(f"ожидался JSON-объект, получен {type(parsed).__name__}")
+            raise DeepSeekBadResponse(f"ожидался JSON-объект, получен {type(parsed).__name__}")
 
         return parsed, counters

@@ -7,6 +7,7 @@
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -415,3 +416,79 @@ def test_second_run_on_the_same_day_does_not_overwrite_the_first(tmp_path):
 
     assert first != second
     assert first.exists() and second.exists()
+
+
+# --------------------------------------------------------------------------
+# Сам набор в репозитории
+# --------------------------------------------------------------------------
+
+SHIPPED = Path(__file__).parent / "golden"
+
+
+def test_shipped_golden_set_loads():
+    """Битый JSON в наборе должен падать здесь, а не на середине платного прогона."""
+    cases = load_cases(SHIPPED)
+
+    assert len(cases) >= 8
+
+
+def test_shipped_set_has_at_least_one_trap():
+    """Без ловушки метрику выгодно обманывать (ROADMAP.md → «Оценка качества»)."""
+    assert any(case.is_trap for case in load_cases(SHIPPED))
+
+
+def test_shipped_queries_are_unique():
+    """Две одинаковые формулировки — это одна задача, посчитанная дважды."""
+    queries = [case.query_text for case in load_cases(SHIPPED)]
+
+    assert len(queries) == len(set(queries))
+
+
+def test_shipped_expected_repos_look_like_full_names():
+    """`owner/name` — то, что сравнивается с выдачей; ссылка или имя без владельца
+    молча дали бы recall 0 и выглядели бы как плохой поиск."""
+    for case in load_cases(SHIPPED):
+        for full_name in case.expected_repos:
+            assert full_name.count("/") == 1, f"{case.slug}: {full_name}"
+            assert not full_name.startswith("http"), f"{case.slug}: {full_name}"
+
+
+# --------------------------------------------------------------------------
+# Находки пилотного прогона 2026-09-05
+# --------------------------------------------------------------------------
+
+
+def test_trap_has_no_search_ceiling():
+    """Ловушка не участвует в recall@50: там нечего искать.
+
+    Пилот 2026-09-05 дал recall@10 = 0,60 при recall@50 = 0,48 — потолок ниже
+    того, что он ограничивает. Причина: ловушке ставился ноль за то, что поиск
+    вернул кандидатов, хотя вернуть их он обязан — иначе Слою 1 некого отвергать.
+    """
+    result = evaluate_case(
+        GoldenCase(slug="trap", **TRAP),
+        options=ScanOptions(),
+        log=Recorder(),
+        runner=runner_returning(outcome(passed=())),
+    )
+
+    assert result.recall_at_10 == 1.0
+    assert result.recall_at_50 is None
+
+
+def test_ceiling_never_falls_below_the_metric_it_bounds():
+    """Инвариант: recall@50 ≥ recall@10 по построению — эталон, дошедший
+    до конца Слоя 1, обязан был сначала найтись поиском."""
+    run = evaluate(
+        [
+            case("found-and-passed", expected_repos=["owner1/repo1"]),
+            case("found-not-passed", expected_repos=["owner3/repo3"]),
+            GoldenCase(slug="trap", **TRAP),
+        ],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=runner_returning(outcome(passed=(1, 2), candidates=(1, 2, 3))),
+    )
+
+    summary = run.summary()
+    assert summary["recall_at_50"] >= summary["recall_at_10"]

@@ -1,0 +1,345 @@
+{
+  "generated_at": "2026-09-05T18:51:34.306709Z",
+  "options": {
+    "max_candidates": 15,
+    "audit_limit": 10,
+    "report_limit": 5,
+    "off_peak": false,
+    "refresh": false
+  },
+  "summary": {
+    "cases_total": 8,
+    "cases_measured": 8,
+    "cases_failed": 0,
+    "traps": 1,
+    "recall_at_10": 0.6042,
+    "recall_at_50": 0.4792,
+    "target_met": true,
+    "cost_usd_total": 0.112305,
+    "duration_sec_median": 82.9,
+    "partial_runs": 3
+  },
+  "cases": [
+    {
+      "slug": "browser-automation-node",
+      "query_text": "хочу гонять браузер из node.js: кликать по страницам, заполнять формы и забирать данные",
+      "status": "ok",
+      "expected": [
+        "puppeteer/puppeteer",
+        "microsoft/playwright"
+      ],
+      "found": [
+        "jo-inc/camofox-browser",
+        "microlinkhq/browserless",
+        "CloakHQ/CloakBrowser",
+        "figranium/figranium",
+        "sebastiancarlos/beachpatrol",
+        "redf0x1/camofox-browser",
+        "segment-boneyard/nightmare",
+        "microsoft/playwright",
+        "getmaxun/maxun",
+        "puppeteer/puppeteer",
+        "citrolabs/ego-lite",
+        "pinchtab/pinchtab",
+        "microsoft/playwright-mcp",
+        "apify/crawlee",
+        "autoscrape-labs/pydoll"
+      ],
+      "passed": [
+        "puppeteer/puppeteer",
+        "microsoft/playwright",
+        "apify/crawlee",
+        "segment-boneyard/nightmare",
+        "microlinkhq/browserless",
+        "CloakHQ/CloakBrowser",
+        "sebastiancarlos/beachpatrol",
+        "jo-inc/camofox-browser",
+        "figranium/figranium",
+        "redf0x1/camofox-browser"
+      ],
+      "recall_at_10": 1.0,
+      "recall_at_50": 1.0,
+      "cost_usd": 0.01878,
+      "duration_sec": 96.4,
+      "partial": false,
+      "error": null
+    },
+    {
+      "slug": "go-db-migrations",
+      "query_text": "нужен инструмент для миграций схемы базы данных в сервисе на go",
+      "status": "ok",
+      "expected": [
+        "golang-migrate/migrate",
+        "pressly/goose"
+      ],
+      "found": [
+        "amacneil/dbmate",
+        "pressly/goose",
+        "golang-migrate/migrate",
+        "shogo82148/schemalex-deploy",
+        "lukaszbudnik/migrator",
+        "maragudk/migrate",
+        "maestro-go/maestro",
+        "aaif-goose/goose",
+        "etcd-io/etcd",
+        "pingcap/tidb",
+        "mukul975/Anthropic-Cybersecurity-Skills",
+        "Atlas-OS/Atlas",
+        "dgraph-io/dgraph",
+        "gofr-dev/gofr",
+        "BlinkDL/RWKV-LM"
+      ],
+      "passed": [
+        "golang-migrate/migrate",
+        "maestro-go/maestro",
+        "amacneil/dbmate",
+        "pressly/goose",
+        "maragudk/migrate",
+        "lukaszbudnik/migrator",
+        "gofr-dev/gofr"
+      ],
+      "recall_at_10": 1.0,
+      "recall_at_50": 1.0,
+      "cost_usd": 0.011773,
+      "duration_sec": 66.1,
+      "partial": false,
+      "error": null
+    },
+    {
+      "slug": "k8s-secrets-in-git",
+      "query_text": "как хранить секреты кубернетеса прямо в гите, чтобы пароли не лежали открытым текстом",
+      "status": "ok",
+      "expected": [
+        "bitnami/sealed-secrets",
+        "getsops/sops",
+        "external-secrets/external-secrets"
+      ],
+      "found": [
+        "jkroepke/helm-secrets",
+        "bitnami/sealed-secrets",
+        "firebox251/k8s-sealed-secrets",
+        "deepfence/SecretScanner",
+        "OWASP/wrongsecrets",
+        "jx3-gitops-repositories/jx3-eks-asm",
+        "jx3-gitops-repositories/jx3-gke-gsm",
+        "samirtahir91/github-app-operator",
+        "isindir/sops-secrets-operator",
+        "jx3-gitops-repositories/jx3-gke-gsm-gitea",
+        "envkey/envkey",
+        "factory-level/harness-hg",
+        "hatembentayeb/omo",
+        "DawnBreather/gitseal",
+        "reddypolukarthikeya/gitops-infra"
+      ],
+      "passed": [
+        "bitnami/sealed-secrets",
+        "jkroepke/helm-secrets",
+        "isindir/sops-secrets-operator",
+        "DawnBreather/gitseal"
+      ],
+      "recall_at_10": 0.3333,
+      "recall_at_50": 0.3333,
+      "cost_usd": 0.01216,
+      "duration_sec": 82.6,
+      "partial": true,
+      "error": null
+    },
+    {
+      "slug": "kazakh-nlp",
+      "query_text": "нужна морфология и токенизация для казахского языка",
+      "status": "ok",
+      "expected": [
+        "nlacslab/kaznlp",
+        "apertium/apertium-kaz"
+      ],
+      "found": [
+        "amir-nuriyev/KazStem",
+        "1morello/kaz-morph",
+        "stanfordnlp/stanza",
+        "legastero/stanza",
+        "Allessyer/awesome-kaz-datasets",
+        "ufal/udpipe",
+        "eeeXun/gtt",
+        "alenisaw/awesome-kaz-models",
+        "darkhanakh/pg-kazsearch",
+        "bnosac/udpipe",
+        "TakeLab/spacy-udpipe",
+        "explosion/spacy-stanza",
+        "Venom1991/refind-btrfs",
+        "observIQ/stanza",
+        "apertium/apertium-html-tools"
+      ],
+      "passed": [
+        "ufal/udpipe",
+        "stanfordnlp/stanza",
+        "amir-nuriyev/KazStem",
+        "bnosac/udpipe",
+        "explosion/spacy-stanza",
+        "1morello/kaz-morph",
+        "TakeLab/spacy-udpipe",
+        "darkhanakh/pg-kazsearch"
+      ],
+      "recall_at_10": 0.0,
+      "recall_at_50": 0.0,
+      "cost_usd": 0.015223,
+      "duration_sec": 89.9,
+      "partial": false,
+      "error": null
+    },
+    {
+      "slug": "ocr-receipts-offline",
+      "query_text": "распознать текст со сканов чеков, желательно офлайн, без облачных сервисов",
+      "status": "ok",
+      "expected": [
+        "tesseract-ocr/tesseract",
+        "PaddlePaddle/PaddleOCR",
+        "JaidedAI/EasyOCR"
+      ],
+      "found": [
+        "danschultzer/receipt-scanner",
+        "bhimrazy/receipt-ocr",
+        "ReceiptManager/receipt-parser-legacy",
+        "clovaai/cord",
+        "ReceiptManager/receipt-manager-app",
+        "Mojtaba-Alehosseini/receipt-ocr-reader",
+        "Asprise/receipt-ocr",
+        "ReceiptManager/receipt-parser-server",
+        "tejasvi96/OCR-Scanned-Receipts",
+        "api-evangelist/dext",
+        "veryfi/veryfi-lens-receipts-android-demo",
+        "veryfi/veryfi-lens-long-receipts-android-demo",
+        "knotsberryofficial-hash/n8n-node-billflux-invoice-receipt-ocr",
+        "yelinaung/expense-bot",
+        "drakarah/ocr-receipt"
+      ],
+      "passed": [
+        "Mojtaba-Alehosseini/receipt-ocr-reader",
+        "ReceiptManager/receipt-parser-legacy",
+        "drakarah/ocr-receipt",
+        "tejasvi96/OCR-Scanned-Receipts",
+        "danschultzer/receipt-scanner",
+        "ReceiptManager/receipt-parser-server",
+        "bhimrazy/receipt-ocr",
+        "ReceiptManager/receipt-manager-app"
+      ],
+      "recall_at_10": 0.0,
+      "recall_at_50": 0.0,
+      "cost_usd": 0.01731,
+      "duration_sec": 85.5,
+      "partial": true,
+      "error": null
+    },
+    {
+      "slug": "pdf-tables",
+      "query_text": "нужен парсер PDF-таблиц на Python",
+      "status": "ok",
+      "expected": [
+        "camelot-dev/camelot",
+        "jsvine/pdfplumber"
+      ],
+      "found": [
+        "ispras/dedoc",
+        "microsoft/table-transformer",
+        "chezou/tabula-py",
+        "jsvine/pdfplumber",
+        "xavctn/img2table",
+        "drmingler/docling-api",
+        "camelot-dev/excalibur",
+        "WZBSocialScienceCenter/pdftabextract",
+        "genieincodebottle/parsemypdf",
+        "kalle07/pdf2txt-parser",
+        "ashima/pdf-table-extract",
+        "Zipstack/llmwhisperer-table-extraction",
+        "cseas/ocr-table",
+        "MikeWuPing/pdf2md",
+        "vitali84/pdf-to-csv-table-extactor"
+      ],
+      "passed": [
+        "jsvine/pdfplumber",
+        "chezou/tabula-py",
+        "xavctn/img2table",
+        "ispras/dedoc",
+        "ashima/pdf-table-extract",
+        "vitali84/pdf-to-csv-table-extactor",
+        "camelot-dev/excalibur",
+        "microsoft/table-transformer",
+        "MikeWuPing/pdf2md",
+        "drmingler/docling-api"
+      ],
+      "recall_at_10": 0.5,
+      "recall_at_50": 0.5,
+      "cost_usd": 0.016673,
+      "duration_sec": 83.3,
+      "partial": false,
+      "error": null
+    },
+    {
+      "slug": "rust-cli-args",
+      "query_text": "чем в rust разбирать аргументы командной строки",
+      "status": "ok",
+      "expected": [
+        "clap-rs/clap"
+      ],
+      "found": [
+        "clap-rs/clap",
+        "ajeetdsouza/zoxide",
+        "sharkdp/hyperfine",
+        "denisidoro/navi",
+        "o2sh/onefetch",
+        "sile/noargs",
+        "BonnyAD9/pareg",
+        "openharmony/third_party_rust_atty",
+        "DoumanAsh/arg.rs",
+        "david-wallace-croft/commander",
+        "sttk/cliargs-rust",
+        "rtk-ai/rtk",
+        "tw93/Pake",
+        "BurntSushi/ripgrep",
+        "sharkdp/bat"
+      ],
+      "passed": [
+        "clap-rs/clap",
+        "sile/noargs",
+        "DoumanAsh/arg.rs",
+        "sttk/cliargs-rust",
+        "BonnyAD9/pareg",
+        "david-wallace-croft/commander"
+      ],
+      "recall_at_10": 1.0,
+      "recall_at_50": 1.0,
+      "cost_usd": 0.010759,
+      "duration_sec": 66.5,
+      "partial": true,
+      "error": null
+    },
+    {
+      "slug": "trap-1c-sausage-costing",
+      "query_text": "нужен готовый модуль для 1С, который считает себестоимость колбасного цеха по нашим техкартам",
+      "status": "none_passed",
+      "expected": [],
+      "found": [
+        "1cFE/1costingfe",
+        "ryanmlo/1clickparish",
+        "Svett84/1c-cost-analysis-system",
+        "Alzork/1c-sheets-rpa",
+        "divyasaxenaa/Reinforcement-Learning-DynaQ-PrioritySweeping-TrajectorySampling",
+        "1Cost/1cost",
+        "joaocostasilva20/semana1-1C--Jo-o-Vitor-Da-Costa-da-Silva",
+        "nikitarnd24-maker/1c-construction-costs",
+        "ZethetaIntern/Project-1C-DevOps-Cloud-Engineer-Infrastructure-Cost-Optimisation",
+        "Ferfkm/Costa_1C_3tri",
+        "ericcastelli/1clickparish",
+        "jsun010105/adaptive_token_pruning_for_eff_20260710_162946_1c1c1af0",
+        "SergSm/py-1c-different-bases-cost-alignment",
+        "vanin2004/CalculatorOfTotalPrice"
+      ],
+      "passed": [],
+      "recall_at_10": 1.0,
+      "recall_at_50": 0.0,
+      "cost_usd": 0.009628,
+      "duration_sec": 66.6,
+      "partial": false,
+      "error": null
+    }
+  ]
+}

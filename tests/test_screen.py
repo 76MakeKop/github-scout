@@ -12,6 +12,7 @@ from uuid import UUID
 
 import pytest
 
+from scout.deepseek import DeepSeekBadResponse
 from scout.schemas import Candidate, ModelName, ScreeningVerdict
 from scout.screening import (
     MAX_README_CHARS,
@@ -485,3 +486,37 @@ def test_metadata_reaches_the_model(field):
     run([candidate(1)], deepseek=deepseek)
 
     assert str(getattr(candidate(1), field)) in deepseek.calls[0]["user"]
+
+
+def test_unparseable_answer_costs_a_retry_not_a_candidate():
+    """Осечка генерации лечится повтором: пилот 2026-09-05 потерял так кандидата.
+
+    Модель вернула пустую строку вместо JSON, `DeepSeekBadResponse` улетел
+    в общий перехват живучести, и репозиторий выбыл насовсем — хотя стоил
+    одного повтора, как и ответ не по схеме.
+    """
+
+    class BlanksOnce(FakeDeepSeek):
+        def chat_json(self, **kwargs):
+            if not self.calls:
+                self.calls.append(kwargs)
+                raise DeepSeekBadResponse("модель вернула не-JSON")
+            return super().chat_json(**kwargs)
+
+    outcome = run([candidate(1)], deepseek=BlanksOnce())
+
+    assert outcome.failed == []
+    assert len(outcome.result.results) == 1
+
+
+def test_two_unparseable_answers_still_give_up():
+    class AlwaysBlank(FakeDeepSeek):
+        def chat_json(self, **kwargs):
+            raise DeepSeekBadResponse("модель вернула не-JSON")
+
+    log = Recorder()
+    outcome = run([candidate(1)], deepseek=AlwaysBlank(), logger=log)
+
+    assert outcome.failed == ["owner1/repo1"]
+    assert "screening_bad_response" in log.names()
+    assert "screening_crash" not in log.names()

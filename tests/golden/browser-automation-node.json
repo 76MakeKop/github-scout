@@ -1,0 +1,9 @@
+{
+  "query_text": "хочу гонять браузер из node.js: кликать по страницам, заполнять формы и забирать данные",
+  "expected_repos": [
+    "puppeteer/puppeteer",
+    "microsoft/playwright"
+  ],
+  "expected_verdict": "USE",
+  "note": "Очевидная, JS/TS. Проверяет находку дня 5: language:javascript против библиотек, написанных на TypeScript."
+}

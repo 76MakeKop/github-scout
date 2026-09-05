@@ -12,6 +12,7 @@ from uuid import UUID
 import pytest
 
 from scout.queries import (
+    MAX_BOOLEAN_OPERATORS,
     MAX_QUERY_LENGTH,
     MIN_QUERIES,
     PER_PAGE,
@@ -294,3 +295,31 @@ def test_too_poor_intent_raises():
 def test_result_survives_schema_revalidation():
     payload = json.loads(build().model_dump_json())
     assert SearchQuerySet.model_validate(payload).queries[0].id == "q1"
+
+
+def test_library_family_stays_within_the_boolean_operator_limit():
+    """Search API отвечает 422 на запрос с более чем пятью AND/OR/NOT.
+
+    Найдено пилотом golden-set 2026-09-05: интент с семью гипотезами давал шесть
+    `OR`, GitHub отклонял запрос, и всё семейство `library` пропадало из выдачи
+    молча — единственное семейство, которое ищет нишевые проекты по имени.
+    """
+    intent = make_intent(
+        known_libraries=["one", "two", "three", "four", "five", "six", "seven", "eight"]
+    )
+
+    library = next(q for q in build_query_set(intent).queries if q.family.value == "library")
+
+    assert library.q.count(" OR ") <= MAX_BOOLEAN_OPERATORS
+
+
+def test_library_family_keeps_the_most_confident_hypotheses():
+    """Гипотезы идут по убыванию уверенности модели — режется хвост, а не голова."""
+    intent = make_intent(
+        known_libraries=["camelot", "tabula", "pdfplumber", "fitz", "borb", "pypdf", "slate"]
+    )
+
+    library = next(q for q in build_query_set(intent).queries if q.family.value == "library")
+
+    assert "camelot" in library.q
+    assert "slate" not in library.q

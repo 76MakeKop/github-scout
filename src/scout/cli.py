@@ -446,10 +446,9 @@ def _print_eval(run: EvalRun, options: ScanOptions) -> None:
             print(f"{result.slug:24} {'—':>10} {'—':>10}  ошибка: {result.error}")
             continue
         flag = "  ⚠ partial" if result.partial else ""
-        print(
-            f"{result.slug:24} {result.recall_at_10:>10.2f} {result.recall_at_50:>10.2f}"
-            f"  {result.status}{flag}"
-        )
+        # У ловушки нет эталона, значит нет и потолка поиска: прочерк честнее нуля.
+        ceiling = "—" if result.recall_at_50 is None else f"{result.recall_at_50:.2f}"
+        print(f"{result.slug:24} {result.recall_at_10:>10.2f} {ceiling:>10}  {result.status}{flag}")
 
     summary = run.summary()
     verdict = "цель недели 2 взята" if summary["target_met"] else "ниже цели 0,60 — чинить поиск"

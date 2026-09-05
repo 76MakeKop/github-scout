@@ -34,6 +34,13 @@ BROAD_MIN_STARS_WITHOUT_LANGUAGE = 100
 """Без `language:` невод шире, и порог звёзд поднимается — вырожденный случай QUERIES.md."""
 
 MAX_QUERY_LENGTH = 256  # SCHEMAS.md §3: maxLength поля `q`
+
+MAX_BOOLEAN_OPERATORS = 5
+"""Потолок GitHub Search API: «More than five AND / OR / NOT operators were used»
+приходит как 422 Validation Failed. Найдено живым прогоном golden-set 2026-09-05."""
+
+MAX_LIBRARY_NAMES = MAX_BOOLEAN_OPERATORS + 1
+"""Шесть имён — ровно пять `OR` между ними."""
 MIN_QUERIES = 5  # SCHEMAS.md §3: minItems
 
 CORE_NOUN_WORDS = 2
@@ -146,8 +153,16 @@ def _library_clause(intent: Intent) -> str:
     """OR-список гипотез имён, укороченный с хвоста до влезающего в лимит.
 
     Гипотезы идут в порядке убывания уверенности модели, поэтому отбрасывается хвост.
+
+    Ограничений два, и длина строки — лишь одно из них. Search API отклоняет
+    запрос с более чем пятью булевыми операторами (422 Validation Failed), и до
+    дня 10 генератор об этом не знал: интент с семью гипотезами давал шесть `OR`,
+    GitHub отвечал 422, и всё семейство `library` пропадало из выдачи молча —
+    ровно то семейство, которое единственное умеет находить нишевые проекты
+    по имени.
     """
     names = [_quoted(name.strip()) for name in intent.known_libraries if name.strip()]
+    names = names[:MAX_LIBRARY_NAMES]
     while names:
         clause = _join(" OR ".join(names), "in:name,description")
         if len(clause) <= MAX_QUERY_LENGTH:

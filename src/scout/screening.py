@@ -36,7 +36,7 @@ from pydantic import ValidationError
 from scout import config
 from scout.config import MissingCredential
 from scout.cost import token_usage
-from scout.deepseek import DeepSeekAuth, DeepSeekClient
+from scout.deepseek import DeepSeekAuth, DeepSeekBadResponse, DeepSeekClient
 from scout.github import GitHubAuth, GitHubClient, GitHubError
 from scout.log import RunLogger
 from scout.schemas import (
@@ -253,12 +253,33 @@ def _screen_candidate(
     user = _user_message(intent, candidate, readme)
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        payload, counters = client.chat_json(
-            system=system,
-            user=user,
-            model=ModelName.FLASH.value,
-            temperature=0.0,
-        )
+        try:
+            payload, counters = client.chat_json(
+                system=system,
+                user=user,
+                model=ModelName.FLASH.value,
+                temperature=0.0,
+            )
+        except DeepSeekBadResponse as exc:
+            # Осечка генерации, а не поломка сервиса: тот же запрос со второй
+            # попытки обычно даёт разбираемый JSON. Приравнено к невалидной схеме
+            # (ARCHITECTURE.md: «1 повтор»), потому что для кандидата это одно
+            # и то же — ответ, из которого не собрать `ScreeningItem`.
+            if logger:
+                logger.info(
+                    "screening_bad_response",
+                    full_name=candidate.full_name,
+                    attempt=attempt,
+                    detail=str(exc),
+                )
+            if attempt == MAX_ATTEMPTS:
+                if logger:
+                    logger.error(
+                        "screening_failed", full_name=candidate.full_name, problems=[str(exc)]
+                    )
+                return None, totals
+            continue
+
         for key, value in counters.items():
             totals[key] = totals.get(key, 0) + value
 

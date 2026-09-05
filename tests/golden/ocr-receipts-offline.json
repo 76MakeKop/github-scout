@@ -1,0 +1,10 @@
+{
+  "query_text": "распознать текст со сканов чеков, желательно офлайн, без облачных сервисов",
+  "expected_repos": [
+    "tesseract-ocr/tesseract",
+    "PaddlePaddle/PaddleOCR",
+    "JaidedAI/EasyOCR"
+  ],
+  "expected_verdict": "USE",
+  "note": "Средняя. Формулировка без единого технического термина вроде OCR — проверяет, вытащит ли интент нужное слово сам."
+}

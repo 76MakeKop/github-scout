@@ -15,7 +15,7 @@ from uuid import UUID
 from pydantic import ValidationError
 
 from scout import config
-from scout.deepseek import DeepSeekClient
+from scout.deepseek import DeepSeekBadResponse, DeepSeekClient
 from scout.log import RunLogger
 from scout.schemas import Intent, ModelName
 
@@ -70,12 +70,24 @@ def extract_intent(
     usage: dict[str, int] = {}
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        payload, counters = client.chat_json(
-            system=system,
-            user=user,
-            model=ModelName.FLASH.value,
-            temperature=0.0,
-        )
+        try:
+            payload, counters = client.chat_json(
+                system=system,
+                user=user,
+                model=ModelName.FLASH.value,
+                temperature=0.0,
+            )
+        except DeepSeekBadResponse as exc:
+            # Неразбираемый ответ равносилен ответу не по схеме: и там, и там
+            # интента нет, и оба лечатся одним повтором. Живой прогон дня 10
+            # поймал такую осечку на скрининге; здесь она стоила бы всего скана.
+            errors.append(str(exc))
+            if logger:
+                logger.info("intent_bad_response", attempt=attempt, detail=str(exc))
+            if attempt == MAX_ATTEMPTS:
+                break
+            continue
+
         usage = counters
 
         try:
