@@ -56,8 +56,6 @@ from scout.schemas import (
 )
 from scout.screening import ScreeningRun
 
-NOT_YET = "реализуется на неделе 2"
-
 BUILD_ADVICE = "Кандидатов нет — рекомендация BUILD: подходящего открытого решения не нашлось."
 
 
