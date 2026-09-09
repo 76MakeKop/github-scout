@@ -133,6 +133,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--out", default=str(DEFAULT_EVAL_DIR), help="куда положить JSON прогона"
     )
     evaluation.add_argument(
+        "--journal",
+        default=None,
+        help="черновик прогона: задача пишется на диск сразу, как отработала. "
+        "Повторный запуск с тем же файлом досчитывает только недостающее "
+        "и не платит за уже измеренное",
+    )
+    evaluation.add_argument(
         "--dry-run",
         action="store_true",
         help="проверить набор и выйти: ни одного вызова модели, ни одного цента",
@@ -420,7 +427,12 @@ def cmd_eval(args: argparse.Namespace) -> int:
     )
 
     try:
-        run = evaluate(cases, options=options, log=log)
+        run = evaluate(
+            cases,
+            options=options,
+            log=log,
+            journal=Path(args.journal) if args.journal else None,
+        )
     except (MissingCredential, DeepSeekAuth, GitHubAuth) as exc:
         return _credential_error(log, exc)
     except DeepSeekError as exc:

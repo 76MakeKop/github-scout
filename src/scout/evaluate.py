@@ -21,6 +21,7 @@ BUILD» — это и есть пустой `passed`. В `recall@50` ловуш�
 """
 
 import json
+import os
 import statistics
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -103,6 +104,25 @@ class CaseResult:
             "error": self.error,
         }
 
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "CaseResult":
+        """Обратная к `as_json`. Нужна журналу: строка на диске — это уже оплаченный
+        замер, и поднимать его надо ровно тем же объектом, каким он был записан."""
+        return cls(
+            slug=payload["slug"],
+            query_text=payload["query_text"],
+            status=payload["status"],
+            expected=list(payload.get("expected") or []),
+            found=list(payload.get("found") or []),
+            passed=list(payload.get("passed") or []),
+            recall_at_10=payload.get("recall_at_10") or 0.0,
+            recall_at_50=payload.get("recall_at_50"),
+            cost_usd=payload.get("cost_usd") or 0.0,
+            duration_sec=payload.get("duration_sec") or 0.0,
+            partial=bool(payload.get("partial")),
+            error=payload.get("error"),
+        )
+
 
 @dataclass
 class EvalRun:
@@ -184,6 +204,45 @@ def load_cases(directory: Path = DEFAULT_GOLDEN_DIR) -> list[GoldenCase]:
     if not cases:
         raise EvalError(f"в каталоге {directory} нет ни одного файла задачи")
     return cases
+
+
+def read_journal(path: Path) -> dict[str, CaseResult]:
+    """Уже оплаченные задачи из черновика прогона, по slug.
+
+    Оборванная последняя строка пропускается молча, и это не небрежность:
+    журнал существует ровно на случай, когда процесс убили посреди записи.
+    Ронять на ней возобновление значило бы терять весь черновик из-за того
+    единственного события, ради которого он и заводится.
+    """
+    if not path.exists():
+        return {}
+
+    done: dict[str, CaseResult] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+            result = CaseResult.from_json(payload)
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
+        done[result.slug] = result
+    return done
+
+
+def append_journal(path: Path, result: CaseResult) -> None:
+    """Дописывает одну завершённую задачу и доводит её до диска.
+
+    `fsync` здесь не перестраховка: без него строка остаётся в буфере ОС, и
+    `kill -9` уносит замер, который уже стоил денег. Одна синхронизация на
+    задачу против трёх минут её прогона — цена, которой нет.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(result.as_json(), ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def recall(expected: Sequence[str], actual: Sequence[str]) -> float:
@@ -269,24 +328,48 @@ def evaluate(
     log: RunLogger,
     github: GitHubClient | None = None,
     runner: Callable[..., ScanOutcome] = run_scan,
+    journal: Path | None = None,
 ) -> EvalRun:
     """Прогоняет набор целиком одним клиентом GitHub.
 
     Клиент один на все задачи намеренно: в нём живут троттлинг поиска и счётчик
     запросов, и новый клиент на каждую задачу означал бы обнуление обоих — набор
     из двадцати пяти задач упёрся бы во вторичный лимит на середине.
+
+    `journal` делает прогон возобновляемым. Задача пишется на диск сразу после
+    того, как отработала, а не в конце набора: полный прогон идёт полтора часа,
+    и остановка на середине без журнала сжигает всё оплаченное — ровно это
+    и случилось 2026-09-09, когда прогон убили на 15-й задаче из 25.
+    Повторный запуск с тем же файлом переиспользует измеренное и платит
+    только за оставшееся. Упавшие задачи в журнал не идут: у них нет замера,
+    и повторить их — единственное, что с ними можно сделать.
     """
     options = options or ScanOptions()
-    github = github or GitHubClient(token=config.github_token(), logger=log)
+    done = read_journal(journal) if journal is not None else {}
 
     results: list[CaseResult] = []
     for position, case in enumerate(cases, start=1):
         log.info("eval_progress", case=position, of=len(cases), slug=case.slug)
+
+        measured = done.get(case.slug)
+        if measured is not None:
+            log.info("eval_case_reused", slug=case.slug, cost_usd=round(measured.cost_usd, 6))
+            results.append(measured)
+            continue
+
+        # Клиент создаётся лениво: возобновление, которому нечего досчитывать,
+        # не должно требовать токена и ходить в сеть.
+        if github is None:
+            github = GitHubClient(token=config.github_token(), logger=log)
         # Счётчик поисковых запросов принадлежит одному скану, а не набору:
         # запрет 5 CLAUDE.md ограничивает скан, и без сброса набор упёрся бы
         # в него на второй задаче.
         github.reset_search_budget()
-        results.append(evaluate_case(case, options=options, log=log, github=github, runner=runner))
+
+        result = evaluate_case(case, options=options, log=log, github=github, runner=runner)
+        results.append(result)
+        if journal is not None and result.error is None:
+            append_journal(journal, result)
 
     run = EvalRun(results=results, options=options, generated_at=datetime.now(UTC))
     log.info("eval_done", **run.summary())

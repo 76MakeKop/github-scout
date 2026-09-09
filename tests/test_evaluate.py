@@ -16,11 +16,13 @@ from conftest import screening_run
 from scout.config import MissingCredential
 from scout.evaluate import (
     RECALL_TARGET,
+    CaseResult,
     EvalError,
     GoldenCase,
     evaluate,
     evaluate_case,
     load_cases,
+    read_journal,
     recall,
     write_report,
 )
@@ -416,6 +418,161 @@ def test_second_run_on_the_same_day_does_not_overwrite_the_first(tmp_path):
 
     assert first != second
     assert first.exists() and second.exists()
+
+
+# --------------------------------------------------------------------------
+# Журнал прогона: остановка не должна сжигать оплаченное
+# --------------------------------------------------------------------------
+
+
+def test_case_result_survives_a_round_trip_through_json():
+    """Строка журнала — это оплаченный замер; поднимать его надо тем же объектом."""
+    original = CaseResult(
+        slug="pdf-tables",
+        query_text="нужен парсер PDF-таблиц",
+        status="ok",
+        expected=["camelot-dev/camelot"],
+        found=["camelot-dev/camelot", "jsvine/pdfplumber"],
+        passed=["camelot-dev/camelot"],
+        recall_at_10=1.0,
+        recall_at_50=0.5,
+        cost_usd=0.0123,
+        duration_sec=81.9,
+        partial=True,
+    )
+
+    assert CaseResult.from_json(original.as_json()).as_json() == original.as_json()
+
+
+def test_trap_result_round_trips_with_null_ceiling():
+    """У ловушки `recall_at_50` — None, и он обязан остаться None, а не стать нулём:
+    ноль means «поиск не нашёл», None — «искать было нечего»."""
+    trap = CaseResult(slug="trap", query_text="…", status="ok", recall_at_10=1.0)
+
+    assert CaseResult.from_json(trap.as_json()).recall_at_50 is None
+
+
+def test_journal_gets_a_line_per_case_as_it_goes(tmp_path):
+    """Не в конце набора: полтора часа прогона не должны висеть на одном вызове
+    `write_report` в самом хвосте."""
+    journal = tmp_path / "run.jsonl"
+
+    evaluate(
+        [case("first"), case("second")],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=runner_returning(outcome()),
+        journal=journal,
+    )
+
+    assert [json.loads(line)["slug"] for line in journal.read_text().splitlines()] == [
+        "first",
+        "second",
+    ]
+
+
+def test_journal_keeps_finished_cases_when_the_run_is_killed(tmp_path):
+    """Ровно случай 2026-09-09: процесс убит на середине набора. Всё, что успело
+    отработать, обязано лежать на диске — иначе деньги потрачены впустую."""
+    journal = tmp_path / "run.jsonl"
+
+    def killed_on_the_second(request, **kwargs):
+        if request.query_text == "убить прогон здесь":
+            raise KeyboardInterrupt
+        return outcome()
+
+    with pytest.raises(KeyboardInterrupt):
+        evaluate(
+            [case("done"), case("killed", query_text="убить прогон здесь")],
+            log=Recorder(),
+            github=FakeClient(),
+            runner=killed_on_the_second,
+            journal=journal,
+        )
+
+    assert [json.loads(line)["slug"] for line in journal.read_text().splitlines()] == ["done"]
+
+
+def test_resume_reuses_measured_cases_and_pays_only_for_the_rest(tmp_path):
+    """Догон недостающего: измеренная задача не должна вызывать модель второй раз."""
+    journal = tmp_path / "run.jsonl"
+    evaluate(
+        [case("already")],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=runner_returning(outcome()),
+        journal=journal,
+    )
+
+    ran: list[str] = []
+
+    def recording(request, **kwargs):
+        ran.append(request.query_text)
+        return outcome()
+
+    run = evaluate(
+        [case("already"), case("fresh", query_text="новая задача")],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=recording,
+        journal=journal,
+    )
+
+    assert ran == ["новая задача"]
+    assert [result.slug for result in run.results] == ["already", "fresh"]
+
+
+def test_failed_case_is_not_journalled_so_the_retry_still_happens(tmp_path):
+    """У упавшей задачи нет замера. Записать её значило бы навсегда закрепить
+    обрыв сети как результат и никогда его не переспросить."""
+    journal = tmp_path / "run.jsonl"
+
+    def always_broken(request, **kwargs):
+        raise RuntimeError("сеть отвалилась")
+
+    evaluate(
+        [case("broken")],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=always_broken,
+        journal=journal,
+    )
+
+    assert not journal.exists() or journal.read_text().strip() == ""
+
+
+def test_torn_last_line_does_not_cost_the_whole_journal(tmp_path):
+    """Процесс убили посреди записи. Оборванный хвост пропускается, а всё,
+    что записалось целиком, остаётся оплаченным и переиспользуется."""
+    journal = tmp_path / "run.jsonl"
+    evaluate(
+        [case("intact")],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=runner_returning(outcome()),
+        journal=journal,
+    )
+    with journal.open("a", encoding="utf-8") as stream:
+        stream.write('{"slug": "torn", "query_text": "обор')
+
+    assert list(read_journal(journal)) == ["intact"]
+
+
+def test_resume_with_nothing_left_to_do_needs_no_github_client(tmp_path):
+    """Возобновление полностью закрытого набора не должно требовать токена:
+    ходить в сеть незачем, считать нечего."""
+    journal = tmp_path / "run.jsonl"
+    evaluate(
+        [case("only")],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=runner_returning(outcome()),
+        journal=journal,
+    )
+
+    run = evaluate([case("only")], log=Recorder(), journal=journal)
+
+    assert run.summary()["cases_measured"] == 1
 
 
 # --------------------------------------------------------------------------
