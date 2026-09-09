@@ -9,3 +9,4 @@ __pycache__/
 *.sqlite3-wal
 *.sqlite3-shm
 .DS_Store
+eval/*.journal.jsonl
