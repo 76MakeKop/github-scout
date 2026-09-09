@@ -1,0 +1,9 @@
+{
+  "query_text": "чем в java читать и писать json",
+  "expected_repos": [
+    "FasterXML/jackson-databind",
+    "google/gson"
+  ],
+  "expected_verdict": "USE",
+  "note": "Очевидная, Java. Эталон — `jackson-databind`, а не зонтичный `FasterXML/jackson`: в зонтике нет кода, и наш собственный отсев по «отсутствию любого кода» его выбросит."
+}

@@ -1,0 +1,8 @@
+{
+  "query_text": "нужен нормальный http-клиент для php",
+  "expected_repos": [
+    "guzzle/guzzle"
+  ],
+  "expected_verdict": "USE",
+  "note": "Очевидная, PHP. Один бесспорный ответ и язык, которого больше нигде в наборе нет."
+}

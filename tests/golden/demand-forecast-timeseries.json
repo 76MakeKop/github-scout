@@ -1,0 +1,10 @@
+{
+  "query_text": "спрогнозировать спрос на товары по истории продаж за три года",
+  "expected_repos": [
+    "facebook/prophet",
+    "unit8co/darts",
+    "Nixtla/statsforecast"
+  ],
+  "expected_verdict": "USE",
+  "note": "Средняя, ML. Формулировка бизнесовая, термина «временные ряды» в ней нет — проверяет, дотянет ли интент до него сам, как `ocr-receipts-offline` до слова OCR."
+}

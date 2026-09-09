@@ -1,0 +1,10 @@
+{
+  "query_text": "нужны фиче-флаги, но хостить у себя, не saas",
+  "expected_repos": [
+    "Unleash/unleash",
+    "flagsmith/flagsmith",
+    "thomaspoignant/go-feature-flag"
+  ],
+  "expected_verdict": "USE",
+  "note": "Средняя, инфраструктурная. `Unleash` под AGPL-3.0: на Слое 2 он обязан получить `code_reuse_allowed: false` и не может стать `USE`, оставаясь верным ответом для recall — задача разводит «нашли» и «можно взять»."
+}

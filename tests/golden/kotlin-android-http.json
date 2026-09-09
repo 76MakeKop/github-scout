@@ -1,0 +1,9 @@
+{
+  "query_text": "http-запросы из андроид-приложения на котлине",
+  "expected_repos": [
+    "lysine-dev/okhttp",
+    "lysine-dev/retrofit"
+  ],
+  "expected_verdict": "USE",
+  "note": "Средняя, Kotlin. Эталоны переехали из `square/*`; имена взяты каноническими по API на 2026-09-09 — при расхождении сверять запросом, а не по памяти."
+}

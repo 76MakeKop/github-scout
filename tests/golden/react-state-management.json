@@ -1,0 +1,9 @@
+{
+  "query_text": "как в реакте хранить глобальное состояние приложения",
+  "expected_repos": [
+    "pmndrs/zustand",
+    "reduxjs/redux-toolkit"
+  ],
+  "expected_verdict": "USE",
+  "note": "Очевидная, JS/TS. Оба эталона написаны на TypeScript — вторая после `browser-automation-node` проверка находки дня 5 про `language:javascript`."
+}

@@ -1,0 +1,9 @@
+{
+  "query_text": "сгенерировать клиент к чужому api по его openapi-спеке",
+  "expected_repos": [
+    "OpenAPITools/openapi-generator",
+    "oapi-codegen/oapi-codegen"
+  ],
+  "expected_verdict": "USE",
+  "note": "Средняя. Язык не назван вовсе — проверяет поведение семейств запросов, которые не могут опереться на `language:`."
+}

@@ -426,15 +426,43 @@ SHIPPED = Path(__file__).parent / "golden"
 
 
 def test_shipped_golden_set_loads():
-    """Битый JSON в наборе должен падать здесь, а не на середине платного прогона."""
+    """Битый JSON в наборе должен падать здесь, а не на середине платного прогона.
+
+    Границы — из `ROADMAP.md` → «Оценка качества»: меньше двадцати задач дают шаг
+    измерения крупнее целевой разницы, больше тридцати — час прогона и лишний доллар
+    без прироста разрешения.
+    """
     cases = load_cases(SHIPPED)
 
-    assert len(cases) >= 8
+    assert 20 <= len(cases) <= 30
 
 
-def test_shipped_set_has_at_least_one_trap():
-    """Без ловушки метрику выгодно обманывать (ROADMAP.md → «Оценка качества»)."""
-    assert any(case.is_trap for case in load_cases(SHIPPED))
+def test_shipped_set_has_two_or_three_traps():
+    """Без ловушек метрику выгодно обманывать: пять строк в отчёте всегда лучше
+    пустого ответа, если пустой ответ не засчитывается никогда. Больше трёх — уже
+    перекос: набор начинает мерить осторожность вместо полноты (`ROADMAP.md`)."""
+    traps = [case for case in load_cases(SHIPPED) if case.is_trap]
+
+    assert 2 <= len(traps) <= 3
+
+
+def test_shipped_cases_have_one_to_three_reference_repos():
+    """`ROADMAP.md` задаёт 1–3 эталона на задачу. Ноль — это необъявленная ловушка,
+    больше трёх — задача без единственного правильного ответа, и recall на ней
+    измеряет широту выдачи, а не попадание."""
+    for case in load_cases(SHIPPED):
+        if case.is_trap:
+            continue
+        assert 1 <= len(case.expected_repos) <= 3, f"{case.slug}: {len(case.expected_repos)}"
+
+
+def test_shipped_expected_repos_have_no_duplicates_inside_a_case():
+    """Повтор эталона внутри задачи тихо занижает знаменатель: `recall` сравнивает
+    множества, и дубль сократил бы |expected| без единого признака в отчёте."""
+    for case in load_cases(SHIPPED):
+        lowered = [full_name.lower() for full_name in case.expected_repos]
+
+        assert len(lowered) == len(set(lowered)), f"{case.slug}: дубль в expected_repos"
 
 
 def test_shipped_queries_are_unique():
