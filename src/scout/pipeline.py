@@ -10,22 +10,28 @@
 Решение, что показать человеку и чем ответить оболочке, принимает `cli.py`
 (таблица кодов — в его докстринге).
 
-Слоя 2 в конвейере ещё нет: он появится на дне 11 и встанет между скринингом
-и сборкой отчёта.
+Слой 2 встал между скринингом и сборкой отчёта на дне 11. Отчёта пока нет:
+конвейер отдаёт `AuditResult[]`, а превращение их в `Report` с пятёркой
+кандидатов — день 13.
 """
 
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
 from scout import config
+from scout.audit import audit_candidates
+from scout.cache import DEFAULT_CACHE_PATH, AuditCache
 from scout.cost import token_usage
+from scout.deepseek import DeepSeekClient
 from scout.github import GitHubClient
 from scout.intent import extract_intent
 from scout.log import RunLogger
 from scout.queries import build_query_set
 from scout.schemas import (
+    AuditResult,
     Candidate,
     DroppedCandidate,
     DropStage,
@@ -36,6 +42,11 @@ from scout.schemas import (
 )
 from scout.screening import ScreeningRun, screen
 from scout.search import collect_candidates
+
+CACHE_PATH = DEFAULT_CACHE_PATH
+"""Куда Слой 2 кладёт аудиты. Отдельным именем модуля, а не литералом внутри
+функции: тесты обязаны уводить кэш во временный каталог, иначе прогон писал бы
+в рабочую базу проекта — тем же приёмом, что `cli.DEFAULT_QUEUE_PATH`."""
 
 
 class IntentUnparsed(RuntimeError):
@@ -64,6 +75,8 @@ class ScanOutcome:
     queries_used: list[str] = field(default_factory=list)
     candidates: list[Candidate] = field(default_factory=list)
     screening: ScreeningRun | None = None
+    audits: list[AuditResult] = field(default_factory=list)
+    audit_usage: TokenUsage | None = None
     dropped: list[DroppedCandidate] = field(default_factory=list)
     partial: bool = False
     duration_sec: float = 0.0
@@ -74,9 +87,23 @@ class ScanOutcome:
 
     @property
     def total_cost_usd(self) -> float:
-        """Сумма по этапам. Слой 2 добавит сюда свою строку на дне 11."""
-        usage = self.screening_usage
-        return self.intent_usage.cost_usd + (usage.cost_usd if usage else 0.0)
+        """Сумма по этапам: интент, Слой 1, Слой 2."""
+        screening = self.screening_usage
+        return (
+            self.intent_usage.cost_usd
+            + (screening.cost_usd if screening else 0.0)
+            + (self.audit_usage.cost_usd if self.audit_usage else 0.0)
+        )
+
+    @property
+    def audited_full_names(self) -> list[str]:
+        """Прошедшие Слой 2, по убыванию `score.total`.
+
+        Порядок считает код, а не модель, и второй ключ — `repo_id`: при равном
+        total два прогона обязаны дать одну и ту же пятёрку в отчёте.
+        """
+        ordered = sorted(self.audits, key=lambda a: (-a.score.total, a.repo_id))
+        return [audit.full_name for audit in ordered]
 
     @property
     def passed_full_names(self) -> list[str]:
@@ -90,6 +117,53 @@ class ScanOutcome:
             return []
         by_id = {item.repo_id: item.full_name for item in self.screening.result.results}
         return [by_id[repo_id] for repo_id in self.screening.result.passed if repo_id in by_id]
+
+
+def _run_audit(
+    candidates: Sequence[Candidate],
+    *,
+    screening: ScreeningRun,
+    intent: Intent,
+    github: GitHubClient,
+    log: RunLogger,
+    refresh: bool,
+) -> tuple[list[AuditResult], list[str], dict[str, int]]:
+    """Слой 2 по прошедшим Слой 1, в порядке `passed` (по убыванию relevance).
+
+    Кэш открывается здесь и на время одного скана: `AuditCache` держит соединение
+    SQLite, и оставлять его открытым на весь процесс незачем — скан либо
+    завершится, либо упадёт, и в обоих случаях файл должен быть закрыт.
+
+    Сюда же приходит `--refresh` (техдолг 5): флаг разбирался в `ScanOptions`
+    и доходил до CLI, но передать его было некуда, пока Слоя 2 не существовало.
+    """
+    by_id = {candidate.repo_id: candidate for candidate in candidates}
+    to_audit = [by_id[repo_id] for repo_id in screening.result.passed if repo_id in by_id]
+
+    log.info("reached_stub", stage="audit", note="Слой 2: аудит прошедших скрининг")
+
+    with AuditCache(CACHE_PATH, refresh=refresh) as cache:
+        results, failed, counters = audit_candidates(
+            to_audit,
+            intent,
+            client=DeepSeekClient(logger=log),
+            github=github,
+            cache=cache,
+            logger=log,
+        )
+
+    log.info(
+        "audit_layer_done",
+        audited=len(results),
+        failed=len(failed),
+        requested=len(to_audit),
+        refresh=refresh,
+        verdicts={
+            verdict.value: sum(1 for a in results if a.verdict is verdict)
+            for verdict in {a.verdict for a in results}
+        },
+    )
+    return results, failed, counters
 
 
 def run_scan(
@@ -202,6 +276,30 @@ def run_scan(
         token_usage=usage.model_dump(mode="json"),
     )
 
+    audits: list[AuditResult] = []
+    audit_usage: TokenUsage | None = None
+    if screening.result.passed:
+        audits, audit_failed, audit_counters = _run_audit(
+            found.candidates,
+            screening=screening,
+            intent=intent,
+            github=github,
+            log=log,
+            refresh=request.options.refresh,
+        )
+        if audit_counters:
+            audit_usage = token_usage(ModelName.PRO, audit_counters, moment=now)
+        if audit_failed:
+            partial = True
+            dropped += [
+                DroppedCandidate(
+                    full_name=full_name,
+                    stage=DropStage.AUDIT,
+                    reason="аудит не удался: ответ модели дважды не прошёл схему",
+                )
+                for full_name in audit_failed
+            ]
+
     outcome = ScanOutcome(
         request=request,
         status=ScanStatus.OK if screening.result.passed else ScanStatus.NONE_PASSED,
@@ -210,6 +308,8 @@ def run_scan(
         queries_used=found.queries_used,
         candidates=found.candidates,
         screening=screening,
+        audits=audits,
+        audit_usage=audit_usage,
         dropped=dropped,
         partial=partial,
         duration_sec=time.monotonic() - started,
@@ -219,6 +319,7 @@ def run_scan(
         "scan_cost",
         intent_usd=round(intent_usage.cost_usd, 6),
         screening_usd=round(usage.cost_usd, 6),
+        audit_usd=round(audit_usage.cost_usd, 6) if audit_usage else 0.0,
         total_cost_usd=round(outcome.total_cost_usd, 6),
         pricing_window=usage.pricing_window.value,
     )

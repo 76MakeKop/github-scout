@@ -68,13 +68,24 @@ def ok_intent(monkeypatch):
 
 @pytest.fixture
 def offline(monkeypatch, tmp_path):
-    """Поиск и скрининг без сети: два кандидата, оба прошли.
+    """Поиск, скрининг и аудит без сети: два кандидата, оба прошли.
 
-    Очередь отложенных сканов тоже уводится во временный файл: `scan` разгребает
-    её на старте, и без подмены тесты писали бы в базу проекта.
+    Очередь отложенных сканов и кэш аудитов уводятся во временные файлы: `scan`
+    разгребает очередь на старте, а Слой 2 открывает кэш, и без подмены тесты
+    писали бы в рабочие базы проекта.
+
+    Слой 2 подменяется пустым результатом: эти тесты проверяют порядок стадий и
+    живучесть, а не содержание аудита. Тесты самого аудита ставят свои подмены.
     """
     monkeypatch.setenv("GITHUB_TOKEN", "ghp-fake")
     monkeypatch.setattr(cli, "DEFAULT_QUEUE_PATH", tmp_path / "pending.sqlite3")
+    monkeypatch.setattr(pipeline, "CACHE_PATH", tmp_path / "audits.sqlite3")
+
+    def fake_audit(candidates, intent, *, client, github, cache=None, logger=None, **kwargs):
+        return [], [], {}
+
+    monkeypatch.setattr(pipeline, "audit_candidates", fake_audit)
+    monkeypatch.setattr(pipeline, "DeepSeekClient", lambda **kwargs: None)
 
     def fake_collect(query_set, *, intent, github, limit, logger=None, **kwargs):
         return SearchOutcome(

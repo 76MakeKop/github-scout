@@ -277,15 +277,27 @@ class GitHubClient:
         """None — репозиторий удалён или стал приватным между поиском и аудитом."""
         return self._request(f"/repos/{full_name}", allow_404=True)
 
-    def get_tree(self, full_name: str, sha: str) -> list[dict[str, Any]]:
-        """Дерево файлов, обрезанное до MAX_TREE_PATHS — бюджет контекста Слоя 2."""
+    def get_tree(
+        self, full_name: str, sha: str, *, limit: int | None = MAX_TREE_PATHS
+    ) -> list[dict[str, Any]]:
+        """Дерево файлов. `limit` по умолчанию — бюджет контекста Слоя 2.
+
+        `limit=None` отдаёт дерево целиком, и это не роскошь: обрезка здесь —
+        срез уже полученного ответа, сети он не экономит, зато молча уносит
+        корневые файлы. Живой прогон дня 11 поймал это на `ispras/dedoc`:
+        каталог `dedoc/` сортируется раньше корневых `pyproject.toml` и
+        `setup.py`, срез в триста записей попадает внутрь каталога, и аудит
+        получал «манифеста нет» при трёх манифестах в корне. Кто читает дерево
+        ради поиска файлов, обязан видеть его целиком; урезать под бюджет
+        контекста — дело того, кто собирает промпт.
+        """
         payload = self._request(f"/repos/{full_name}/git/trees/{sha}?recursive=1", allow_404=True)
         if not payload:
             return []
         tree = payload.get("tree", [])
         if payload.get("truncated"):
             self._event("github_tree_truncated", full_name=full_name, returned=len(tree))
-        return tree[:MAX_TREE_PATHS]
+        return tree if limit is None else tree[:limit]
 
     def get_file(self, full_name: str, path: str, ref: str | None = None) -> str | None:
         """Содержимое текстового файла. None — файла нет или он не текстовый."""

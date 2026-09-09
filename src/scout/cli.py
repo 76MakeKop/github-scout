@@ -46,6 +46,7 @@ from scout.pipeline import IntentUnparsed, ScanStatus, run_scan
 from scout.queries import QueryGenerationError
 from scout.scheduler import DEFAULT_QUEUE_PATH, PendingScans, next_offpeak_start
 from scout.schemas import (
+    AuditResult,
     DroppedCandidate,
     PricingWindow,
     ScanOptions,
@@ -281,10 +282,11 @@ def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
         return 0
 
     _print_passed(screening, len(outcome.candidates))
+    _print_audits(outcome.audits)
     _print_degradation(outcome.partial, outcome.dropped)
-    _print_cost(outcome.intent_usage, usage, outcome.total_cost_usd)
+    _print_cost(outcome.intent_usage, usage, outcome.total_cost_usd, outcome.audit_usage)
 
-    log.info("reached_stub", stage="audit", note="Слой 2: следующий пункт плана")
+    log.info("reached_stub", stage="report", note="Отчёт: следующий пункт плана")
     return 0
 
 
@@ -321,8 +323,39 @@ def _print_degradation(partial: bool, dropped: list[DroppedCandidate]) -> None:
             print(f"  - {item.full_name} ({item.stage.value}): {item.reason}")
 
 
-def _print_cost(intent_usage: TokenUsage, screening_usage: TokenUsage, total: float) -> None:
-    """Стоимость по этапам. Слой 2 появится на дне 11 и добавит сюда свою строку."""
+def _print_audits(audits: list[AuditResult]) -> None:
+    """Аудит по каждому кандидату, по убыванию `total`.
+
+    Это ещё не отчёт (день 13): здесь нет ни пятёрки, ни provenance построчно —
+    только то, что Слой 2 успел выяснить, в порядке, который посчитал код.
+    """
+    if not audits:
+        return
+
+    print(f"\nСлой 2 — аудит ({len(audits)}):")
+    for audit in sorted(audits, key=lambda a: (-a.score.total, a.repo_id)):
+        passport = audit.license_passport
+        licence = passport.spdx_id or "лицензия не определена"
+        reuse = "можно брать код" if passport.code_reuse_allowed else "код брать нельзя"
+        effort = audit.fit.integration_effort_days
+        print(f"  {audit.verdict.value:5} {audit.score.total:.2f}  {audit.full_name}")
+        print(
+            f"        {licence} ({passport.copyleft.value}, {reuse}) · "
+            f"интеграция {effort.low:g}–{effort.high:g} дн, вероятно {effort.likely:g}"
+        )
+        if audit.fit.gaps:
+            print(f"        не покрывает: {'; '.join(audit.fit.gaps[:2])}")
+        for risk in audit.risks[:2]:
+            print(f"        риск {risk.type.value}/{risk.severity.value}: {risk.note}")
+
+
+def _print_cost(
+    intent_usage: TokenUsage,
+    screening_usage: TokenUsage,
+    total: float,
+    audit_usage: TokenUsage | None = None,
+) -> None:
+    """Стоимость по этапам: интент, Слой 1, Слой 2."""
     window = "peak" if screening_usage.pricing_window is PricingWindow.PEAK else "off-peak"
 
     print(f"\nСтоимость скана ({window}):")
@@ -336,6 +369,12 @@ def _print_cost(intent_usage: TokenUsage, screening_usage: TokenUsage, total: fl
         f"   ({screening_usage.input_tokens} вход / {screening_usage.output_tokens} выход,"
         f" {screening_usage.cached_input_tokens} из кэша)"
     )
+    if audit_usage:
+        print(
+            f"  Слой 2    {audit_usage.cost_usd:.6f} $"
+            f"   ({audit_usage.input_tokens} вход / {audit_usage.output_tokens} выход,"
+            f" {audit_usage.cached_input_tokens} из кэша)"
+        )
     print(f"  total_cost_usd {total:.6f} $")
 
 
