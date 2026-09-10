@@ -36,6 +36,11 @@ MAX_REPORT_CANDIDATES = 5
 MAX_STRENGTHS = 5
 MAX_WEAKNESSES = 5
 
+MAX_TEXT_CHARS = 200
+"""Предел строки в `SCHEMAS.md` §8. У `Risk.note` в §7 предел 300, и склейка
+`"{тип}: {note}"` вылезает за §8 на длинной заметке — рассогласование контрактов,
+которое разрешает этот слой. Живой прогон 2026-09-10 уронил им весь замер."""
+
 BUILD_RATIONALE = (
     "Готового решения под задачу не нашлось: ни один кандидат не дошёл до аудита "
     "или все отсеяны по существу. Разумный следующий шаг — писать самим."
@@ -57,10 +62,22 @@ def _strengths(audit: AuditResult) -> list[str]:
     """
     covers = [text for text in audit.fit.covers if text.strip()][:MAX_STRENGTHS]
     if covers:
-        return covers
+        return [_fit_text(text) for text in covers]
     return [
         f"Оценка соответствия задаче {audit.score.relevance:.2f} при общей {audit.score.total:.2f}"
     ]
+
+
+def _fit_text(text: str) -> str:
+    """Ужимает строку до предела контракта, помечая обрезку.
+
+    Обрезаем, а не отбрасываем: заметка о риске нужна читателю и в усечённом
+    виде, а молча пропустить её значило бы скрыть найденный риск. Многоточие
+    ставится явно, чтобы обрезка не выглядела законченной мыслью.
+    """
+    if len(text) <= MAX_TEXT_CHARS:
+        return text
+    return text[: MAX_TEXT_CHARS - 1].rstrip() + "…"
 
 
 def _weaknesses(audit: AuditResult) -> list[str]:
@@ -73,7 +90,7 @@ def _weaknesses(audit: AuditResult) -> list[str]:
     blocking = [gap.note for gap in audit.fit.gaps if gap.blocking and gap.note.strip()]
     minor = [gap.note for gap in audit.fit.gaps if not gap.blocking and gap.note.strip()]
     risks = [f"{risk.type.value}: {risk.note}" for risk in audit.risks]
-    return (blocking + minor + risks)[:MAX_WEAKNESSES]
+    return [_fit_text(text) for text in (blocking + minor + risks)[:MAX_WEAKNESSES]]
 
 
 def _candidate(audit: AuditResult, rank: int, html_url: str) -> ReportCandidate:

@@ -348,7 +348,28 @@ def evaluate_case(
 
     found = [candidate.full_name for candidate in outcome.candidates]
     passed = outcome.passed_full_names
-    report = outcome.report(limit=options.report_limit)
+
+    # Сборка отчёта — тоже часть задачи, и падать она обязана внутри её границ:
+    # цена дня 8 в том, что сбой шага стоит шага, а не набора. 2026-09-10
+    # рассогласование пределов §7 и §8 уронило весь замер на первой же задаче.
+    try:
+        report = outcome.report(limit=options.report_limit)
+    except Exception as exc:
+        log.error(
+            "eval_report_failed", slug=case.slug, error_type=type(exc).__name__, error=str(exc)
+        )
+        return CaseResult(
+            slug=case.slug,
+            query_text=case.query_text,
+            status="failed",
+            expected=list(case.expected_repos),
+            found=found,
+            passed=passed,
+            cost_usd=outcome.total_cost_usd,
+            duration_sec=outcome.duration_sec,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+
     top5 = [item.full_name for item in report.candidates]
 
     result = CaseResult(

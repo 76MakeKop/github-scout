@@ -6,6 +6,7 @@
 """
 
 import json
+from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -711,3 +712,28 @@ def test_ceiling_never_falls_below_the_metric_it_bounds():
 
     summary = run.summary()
     assert summary["recall_at_50"] >= summary["recall_at_10"]
+
+
+def test_broken_report_costs_one_case_not_the_whole_run():
+    """Цена дня 8 распространяется и на сборку отчёта: 2026-09-10 рассогласование
+    пределов §7 и §8 уронило весь замер на первой задаче из двенадцати."""
+
+    class Exploding(ScanOutcome):
+        def report(self, **kwargs):
+            raise ValueError("отчёт не собрался")
+
+    def runner(request, **kwargs):
+        base = outcome()
+        return Exploding(**{f.name: getattr(base, f.name) for f in fields(base)})
+
+    run = evaluate(
+        [case("broken"), case("fine", query_text="вторая задача набора")],
+        log=Recorder(),
+        github=FakeClient(),
+        runner=lambda request, **kw: (
+            runner(request, **kw) if request.query_text != "вторая задача набора" else outcome()
+        ),
+    )
+
+    assert [result.status for result in run.results] == ["failed", "ok"]
+    assert run.summary()["cases_measured"] == 1

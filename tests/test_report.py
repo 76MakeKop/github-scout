@@ -274,3 +274,30 @@ def test_detector_checks_prose_fields_too():
 
     with pytest.raises(RegurgitationDetected):
         assert_clean(payload, SOURCE)
+
+
+def test_long_risk_note_does_not_break_the_contract():
+    """Живой прогон 2026-09-10: `Risk.note` в §7 допускает 300 символов, элемент
+    `weaknesses` в §8 — только 200, и склейка «тип: заметка» роняла весь замер
+    на первой же задаче. Слой отчёта обязан разрешать это рассогласование."""
+    audit = audit_result()
+    audit.risks[0].note = "з" * 300
+
+    weakness = report_of([audit]).candidates[0].weaknesses[-1]
+
+    assert len(weakness) <= 200
+    assert weakness.endswith("…")
+
+
+def test_long_gap_note_is_also_trimmed():
+    audit = audit_result()
+    audit.fit.gaps[0].note = "п" * 200
+
+    assert all(len(text) <= 200 for text in report_of([audit]).candidates[0].weaknesses)
+
+
+def test_short_notes_are_left_alone():
+    """Обрезка не должна трогать то, что и так укладывается."""
+    audit = audit_result()
+
+    assert report_of([audit]).candidates[0].weaknesses[0] == "нет OCR"
