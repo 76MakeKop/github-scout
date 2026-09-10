@@ -381,9 +381,21 @@ class Maintenance(SchemaModel):
     releases_12m: NonNegInt | None = None
 
 
+class Gap(SchemaModel):
+    """Чего кандидату не хватает для задачи.
+
+    `blocking` отвечает на факт, а не на важность: задача без этого не решается
+    вовсе, или обход требует своей работы. Косметический пробел — `false`.
+    Решение по вердикту принимает код, знающий пороги и вес лицензии.
+    """
+
+    note: Text200
+    blocking: bool
+
+
 class Fit(SchemaModel):
     covers: list[Text200]
-    gaps: list[Text200]
+    gaps: list[Gap]
     integration_effort_days: EffortDays
 
 

@@ -21,6 +21,7 @@
 """
 
 import json
+import os
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -33,7 +34,13 @@ from scout import config
 from scout.log import RunLogger
 from scout.schemas import AuditResult, CacheEntry
 
-DEFAULT_CACHE_PATH = config.PROJECT_ROOT / ".cache" / "scout.sqlite3"
+DEFAULT_CACHE_PATH = Path(
+    os.environ.get("SCOUT_CACHE_PATH", config.PROJECT_ROOT / ".cache" / "scout.sqlite3")
+)
+"""Переопределяется `SCOUT_CACHE_PATH`. Нужно, когда два замера идут параллельно:
+прогоны «до» и «после» пишут разные версии промпта и логически не конфликтуют,
+но делить один файл SQLite между процессами — значит ловить блокировки на ровном
+месте. Разные файлы убирают общее изменяемое состояние совсем."""
 
 PAYLOAD_TYPE = "audit_result_v1"
 """Версия формата полезной нагрузки. При переходе на `_v2` старые строки

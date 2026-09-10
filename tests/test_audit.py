@@ -240,7 +240,7 @@ def test_audit_result_carries_code_owned_facts():
 
     assert result.full_name == subject.full_name
     assert result.head_sha == subject.head_sha
-    assert result.prompt_version == "l2-1"
+    assert result.prompt_version == "l2-2"
     assert result.model.value == "deepseek-v4-pro"
     assert result.maintenance.last_commit == subject.pushed_at
     assert result.provenance
@@ -403,5 +403,68 @@ def test_audit_logs_the_verdict_and_the_licence():
 
 
 def test_prompt_file_exists_where_the_convention_says():
-    """`CLAUDE.md` → «Где живут промпты»: `l2-1` это `prompts/l2/v1.md`."""
+    """`CLAUDE.md` → «Где живут промпты»: `l2-2` это `prompts/l2/v2.md`."""
     assert audit.load_system_prompt().strip()
+
+
+# --------------------------------------------------------------------------
+# fit.gaps[].blocking (день 13)
+# --------------------------------------------------------------------------
+
+
+def gap(note="пробел", blocking=True):
+    return {"note": note, "blocking": blocking}
+
+
+def test_cosmetic_gap_no_longer_costs_the_use_verdict():
+    """Дефект дня 12: `Flagsmith` с total 0,90 и BSD проиграл `USE` одному
+    пробелу про корпоративные функции, о важности которого код судить не мог."""
+    assert (
+        decide_verdict(
+            0.90, gaps=[gap("нет корпоративных функций", blocking=False)], passport=passport()
+        )
+        is Verdict.USE
+    )
+
+
+def test_blocking_gap_still_costs_it():
+    assert (
+        decide_verdict(0.90, gaps=[gap("не умеет OCR", blocking=True)], passport=passport())
+        is Verdict.FORK
+    )
+
+
+def test_one_blocking_gap_among_cosmetic_ones_is_enough():
+    """Достаточно одного: задача либо решается, либо нет."""
+    gaps = [gap("мелочь", blocking=False), gap("главное", blocking=True), gap("ещё мелочь", False)]
+
+    assert decide_verdict(0.95, gaps=gaps, passport=passport()) is Verdict.FORK
+
+
+def test_gap_without_the_flag_counts_as_blocking():
+    """Умолчание строгое намеренно: ошибка в сторону FORK стоит лишней
+    осторожности, ошибка в сторону USE — рекомендации взять то, что не решает."""
+
+    class Bare:
+        note = "без признака"
+
+    assert decide_verdict(0.95, gaps=[Bare()], passport=passport()) is Verdict.FORK
+
+
+def test_licence_still_outranks_the_blocking_flag():
+    """Порядок проверок не изменился: AGPL остаётся BUILD даже без пробелов."""
+    agpl = passport(spdx="AGPL-3.0", copyleft=Copyleft.STRONG, reuse=False)
+
+    assert decide_verdict(0.99, gaps=[], passport=agpl) is Verdict.BUILD
+
+
+def test_blocking_flag_survives_assembly():
+    answer = dict(MODEL_ANSWER)
+    answer["fit"] = dict(MODEL_ANSWER["fit"]) | {
+        "gaps": [gap("нет OCR", blocking=False), gap("нет асинхронного API", blocking=True)]
+    }
+
+    result = run_audit(answer)
+
+    assert [item.blocking for item in result.fit.gaps] == [False, True]
+    assert result.verdict is Verdict.FORK

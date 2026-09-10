@@ -76,7 +76,7 @@ def audit_result(repo_id: int = 1, head_sha: str = SHA_A, **overrides) -> AuditR
         },
         "fit": {
             "covers": ["извлечение таблиц"],
-            "gaps": ["нет OCR"],
+            "gaps": [{"note": "нет OCR", "blocking": True}],
             "integration_effort_days": {"low": 0.5, "likely": 2.0, "high": 5.0},
         },
         "risks": [{"type": "single-maintainer", "severity": "medium", "note": "один автор"}],

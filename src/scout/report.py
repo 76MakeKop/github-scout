@@ -64,15 +64,16 @@ def _strengths(audit: AuditResult) -> list[str]:
 
 
 def _weaknesses(audit: AuditResult) -> list[str]:
-    """Пробелы и риски одним списком, пробелы первыми.
+    """Пробелы и риски одним списком: блокирующие, потом косметические, потом риски.
 
     Риск и пробел — разные вещи (`не умеет X` против `один мейнтейнер`), но для
     читателя отчёта это одна колонка «на что смотреть». Порядок закреплён:
     сначала то, чего не хватает для задачи, потом то, чем это грозит потом.
     """
-    gaps = [text for text in audit.fit.gaps if text.strip()]
+    blocking = [gap.note for gap in audit.fit.gaps if gap.blocking and gap.note.strip()]
+    minor = [gap.note for gap in audit.fit.gaps if not gap.blocking and gap.note.strip()]
     risks = [f"{risk.type.value}: {risk.note}" for risk in audit.risks]
-    return (gaps + risks)[:MAX_WEAKNESSES]
+    return (blocking + minor + risks)[:MAX_WEAKNESSES]
 
 
 def _candidate(audit: AuditResult, rank: int, html_url: str) -> ReportCandidate:

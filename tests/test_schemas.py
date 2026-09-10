@@ -76,7 +76,7 @@ AUDIT_OK = {
     },
     "fit": {
         "covers": ["извлечение таблиц из текстовых PDF"],
-        "gaps": ["нет OCR для сканов"],
+        "gaps": [{"note": "нет OCR для сканов", "blocking": False}],
         "integration_effort_days": {"low": 2, "likely": 5, "high": 10},
     },
     "risks": [{"type": "dependency", "severity": "medium", "note": "тянет opencv-python"}],

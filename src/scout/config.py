@@ -76,7 +76,7 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 PROMPT_VERSIONS = {
     "intent": "intent-1",
     "l1": "l1-1",
-    "l2": "l2-1",
+    "l2": "l2-2",
 }
 
 

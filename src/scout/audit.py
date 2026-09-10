@@ -103,7 +103,7 @@ def code_reuse_allowed(passport_fields: dict[str, Any]) -> bool:
     return copyleft not in (Copyleft.STRONG.value, Copyleft.UNKNOWN.value, None)
 
 
-def decide_verdict(total: float, *, gaps: Sequence[str], passport: LicensePassport) -> Verdict:
+def decide_verdict(total: float, *, gaps: Sequence[Any], passport: LicensePassport) -> Verdict:
     """Правила `SCHEMAS.md` §7, применяются кодом после получения оценок.
 
     Проверка лицензии стоит первой и до порогов: `copyleft: strong` и
@@ -114,13 +114,31 @@ def decide_verdict(total: float, *, gaps: Sequence[str], passport: LicensePasspo
     if not passport.code_reuse_allowed:
         return Verdict.BUILD
 
-    if total >= USE_THRESHOLD and not gaps:
+    if total >= USE_THRESHOLD and not _blocking(gaps):
         return Verdict.USE
 
     if total >= FORK_THRESHOLD or passport.copyleft is Copyleft.WEAK:
         return Verdict.FORK
 
     return Verdict.BUILD
+
+
+def _blocking(gaps: Sequence[Any]) -> list[Any]:
+    """Пробелы, из-за которых задача остаётся нерешённой.
+
+    Пробел без признака считается блокирующим: это поведение до дня 13, когда
+    `gaps` был списком строк и `USE` требовал полного их отсутствия. Умолчание
+    выбрано строгим намеренно — ошибка в сторону FORK стоит лишней осторожности,
+    ошибка в сторону USE стоит рекомендации взять то, что не решает задачу.
+    """
+    blocking = []
+    for gap in gaps:
+        flag = (
+            gap.get("blocking", True) if isinstance(gap, dict) else getattr(gap, "blocking", True)
+        )
+        if flag:
+            blocking.append(gap)
+    return blocking
 
 
 def _maintenance(candidate: Candidate) -> Maintenance:
