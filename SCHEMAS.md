@@ -550,9 +550,10 @@ Markdown — производная от JSON, а не отдельный ист
   "required": ["key", "repo_id", "head_sha", "payload_type", "payload", "created_at"],
   "additionalProperties": false,
   "properties": {
-    "key": { "type": "string", "pattern": "^repo:\\d+:[0-9a-f]{7,40}$" },
+    "key": { "type": "string", "pattern": "^repo:\\d+:[0-9a-f]{7,40}:l2-\\d+$" },
     "repo_id": { "type": "integer" },
     "head_sha": { "type": "string" },
+    "prompt_version": { "type": "string", "pattern": "^l2-\\d+$" },
     "payload_type": { "const": "audit_result_v1" },
     "payload": { "$ref": "scout/audit_result" },
     "created_at": { "type": "string", "format": "date-time" },
@@ -561,6 +562,15 @@ Markdown — производная от JSON, а не отдельный ист
 }
 ```
 
-Инвалидация — только по смене `head_sha`. Никакого TTL по времени.
+Инвалидация по двум осям: смена `head_sha` (изменился код) и смена
+`prompt_version` (изменился вопрос, который мы коду задаём). Никакого TTL по времени.
+
+**Почему версия промпта в ключе.** `AuditResult` — это не свойство репозитория,
+а ответ конкретного промпта о репозитории. Без версии в ключе бамп до `l2-2`
+молча отдавал бы суждения `l2-1`, и замер «до и после», которого требует
+`CHECKLIST.md` при любой правке промпта, показывал бы «до» оба раза. Ошибка
+при этом тихая: числа приходят, они правдоподобны, и неверны. Записи старых
+версий остаются лежать — прошлый прогон должен воспроизводиться.
+
 При смене `payload_type` (`_v2`) старые записи не читаются и не удаляются автоматически;
 чистка — командой `scout cache drop`.

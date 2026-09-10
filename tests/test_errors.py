@@ -188,7 +188,7 @@ def test_dropped_candidates_are_shown_to_the_user(ok_intent, offline, monkeypatc
     cli.main(["scan", QUERY])
 
     out = capsys.readouterr().out
-    assert "Выбыло кандидатов: 1" in out
+    assert "## Выбыли" in out
     assert "owner9/repo9" in out
 
 

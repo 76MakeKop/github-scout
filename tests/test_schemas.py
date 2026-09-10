@@ -341,9 +341,10 @@ def test_report_invalid_rank_out_of_range():
 
 
 CACHE_OK = {
-    "key": f"repo:12345:{SHA}",
+    "key": f"repo:12345:{SHA}:l2-1",
     "repo_id": 12345,
     "head_sha": SHA,
+    "prompt_version": "l2-1",
     "payload_type": "audit_result_v1",
     "payload": AUDIT_OK,
     "created_at": TS,

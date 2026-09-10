@@ -187,7 +187,37 @@ def test_trap_scores_zero_when_somebody_passed():
 # --------------------------------------------------------------------------
 
 
-def outcome(*, passed=(1, 2), candidates=(1, 2, 3), status=ScanStatus.OK, partial=False, cost=0.01):
+def audit_for(repo_id: int, *, verdict="USE", total=0.85, gaps=()):
+    """Минимальный валидный `AuditResult` — стык проверяется, не содержание."""
+    from test_cache import audit_result
+
+    return audit_result(
+        repo_id=repo_id,
+        verdict=verdict,
+        score={
+            "relevance": total,
+            "quality": total,
+            "maintenance": total,
+            "license": total,
+            "total": total,
+        },
+        fit={
+            "covers": ["решает задачу"],
+            "gaps": list(gaps),
+            "integration_effort_days": {"low": 0.5, "likely": 1.0, "high": 2.0},
+        },
+    )
+
+
+def outcome(
+    *,
+    passed=(1, 2),
+    candidates=(1, 2, 3),
+    status=ScanStatus.OK,
+    partial=False,
+    cost=0.01,
+    audits=(1, 2),
+):
     """`ScanOutcome`, какой отдал бы настоящий конвейер."""
     request = ScanRequest(
         request_id=uuid4(),
@@ -209,6 +239,7 @@ def outcome(*, passed=(1, 2), candidates=(1, 2, 3), status=ScanStatus.OK, partia
         queries_used=["pdf table extraction language:python"],
         candidates=[candidate(n) for n in candidates],
         screening=screening_run(request.request_id, passed=passed),
+        audits=[audit_for(n) for n in audits],
         partial=partial,
         duration_sec=42.0,
     )
@@ -372,6 +403,9 @@ def test_summary_flags_whether_the_target_is_met():
         runner=runner_returning(outcome()),
     ).summary()
 
+    # `target_met` следит за recall@5: это целевая метрика MVP (`ROADMAP.md`),
+    # а recall@10 был целью недели 2 и остался её потолком.
+    assert met["recall_at_5"] >= RECALL_TARGET
     assert met["recall_at_10"] >= RECALL_TARGET
     assert met["target_met"] is True
     assert missed["target_met"] is False

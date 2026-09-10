@@ -10,9 +10,10 @@
 Решение, что показать человеку и чем ответить оболочке, принимает `cli.py`
 (таблица кодов — в его докстринге).
 
-Слой 2 встал между скринингом и сборкой отчёта на дне 11. Отчёта пока нет:
-конвейер отдаёт `AuditResult[]`, а превращение их в `Report` с пятёркой
-кандидатов — день 13.
+Конвейер закрыт целиком: интент → запросы → поиск → Слой 1 → Слой 2 → отчёт.
+Наружу выходит `ScanOutcome`, из которого `report.build_report` собирает `Report`;
+сборка живёт отдельным модулем, потому что она детерминированная и её читают
+двое — печать человеку и прогон golden-set, считающий recall@5.
 """
 
 import time
@@ -37,6 +38,7 @@ from scout.schemas import (
     DropStage,
     Intent,
     ModelName,
+    ReportMode,
     ScanRequest,
     TokenUsage,
 )
@@ -77,6 +79,8 @@ class ScanOutcome:
     screening: ScreeningRun | None = None
     audits: list[AuditResult] = field(default_factory=list)
     audit_usage: TokenUsage | None = None
+    audits_hit: int = 0
+    audits_miss: int = 0
     dropped: list[DroppedCandidate] = field(default_factory=list)
     partial: bool = False
     duration_sec: float = 0.0
@@ -93,6 +97,34 @@ class ScanOutcome:
             self.intent_usage.cost_usd
             + (screening.cost_usd if screening else 0.0)
             + (self.audit_usage.cost_usd if self.audit_usage else 0.0)
+        )
+
+    @property
+    def urls(self) -> dict[str, str]:
+        """`full_name` → `html_url` из кандидатов: в `AuditResult` адреса нет,
+        а собирать его из имени нельзя — GitHub переносит репозитории."""
+        return {candidate.full_name: str(candidate.html_url) for candidate in self.candidates}
+
+    def report(self, *, limit: int = 5, generated_at=None):
+        """Отчёт по этому скану. Сборка — в `report.py`, чтобы её видели двое:
+        печать человеку и прогон golden-set, считающий recall@5."""
+        from scout.report import build_report
+
+        return build_report(
+            request_id=self.request.request_id,
+            query_text=self.request.query_text,
+            audits=self.audits,
+            urls=self.urls,
+            mode=ReportMode.OFF_PEAK if self.request.options.off_peak else ReportMode.SYNC,
+            cost_usd=self.total_cost_usd,
+            duration_sec=self.duration_sec,
+            audits_hit=self.audits_hit,
+            audits_miss=self.audits_miss,
+            partial=self.partial,
+            dropped=self.dropped,
+            queries_used=self.queries_used,
+            limit=limit,
+            generated_at=generated_at,
         )
 
     @property
@@ -127,7 +159,7 @@ def _run_audit(
     github: GitHubClient,
     log: RunLogger,
     refresh: bool,
-) -> tuple[list[AuditResult], list[str], dict[str, int]]:
+) -> tuple[list[AuditResult], list[str], dict[str, int], int]:
     """Слой 2 по прошедшим Слой 1, в порядке `passed` (по убыванию relevance).
 
     Кэш открывается здесь и на время одного скана: `AuditCache` держит соединение
@@ -143,6 +175,7 @@ def _run_audit(
     log.info("reached_stub", stage="audit", note="Слой 2: аудит прошедших скрининг")
 
     with AuditCache(CACHE_PATH, refresh=refresh) as cache:
+        before = {entry.key: entry.hits for entry in cache.entries()}
         results, failed, counters = audit_candidates(
             to_audit,
             intent,
@@ -152,9 +185,17 @@ def _run_audit(
             logger=log,
         )
 
+        after = {entry.key: entry.hits for entry in cache.entries()}
+
+    # Попадание видно по выросшему счётчику `hits`: он растёт ровно в одном месте
+    # (`AuditCache.get_entry`), поэтому сравнение до и после — точный счёт,
+    # а не оценка по числу вызовов модели.
+    hits = sum(1 for key, value in after.items() if value > before.get(key, 0))
+
     log.info(
         "audit_layer_done",
         audited=len(results),
+        cache_hits=hits,
         failed=len(failed),
         requested=len(to_audit),
         refresh=refresh,
@@ -163,7 +204,7 @@ def _run_audit(
             for verdict in {a.verdict for a in results}
         },
     )
-    return results, failed, counters
+    return results, failed, counters, hits
 
 
 def run_scan(
@@ -278,8 +319,9 @@ def run_scan(
 
     audits: list[AuditResult] = []
     audit_usage: TokenUsage | None = None
+    audits_hit = 0
     if screening.result.passed:
-        audits, audit_failed, audit_counters = _run_audit(
+        audits, audit_failed, audit_counters, audits_hit = _run_audit(
             found.candidates,
             screening=screening,
             intent=intent,
@@ -310,6 +352,8 @@ def run_scan(
         screening=screening,
         audits=audits,
         audit_usage=audit_usage,
+        audits_hit=audits_hit,
+        audits_miss=len(audits) - audits_hit,
         dropped=dropped,
         partial=partial,
         duration_sec=time.monotonic() - started,

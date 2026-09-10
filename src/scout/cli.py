@@ -45,6 +45,7 @@ from scout.github import GitHubAuth, GitHubError
 from scout.log import RunLogger, new_run_id
 from scout.pipeline import IntentUnparsed, ScanStatus, run_scan
 from scout.queries import QueryGenerationError
+from scout.report import render_markdown
 from scout.scheduler import DEFAULT_QUEUE_PATH, PendingScans, next_offpeak_start
 from scout.schemas import (
     AuditResult,
@@ -128,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluation.add_argument(
         "--limit", type=int, default=None, help="прогнать только первые N задач набора"
+    )
+    evaluation.add_argument(
+        "--only",
+        default=None,
+        help="прогнать только перечисленные задачи через запятую (по slug). "
+        "Нужен для дешёвых замеров: `--limit` берёт первые по алфавиту, "
+        "а сравнивать надо на задачах, которые реагируют на правку",
     )
     evaluation.add_argument(
         "--out", default=str(DEFAULT_EVAL_DIR), help="куда положить JSON прогона"
@@ -281,11 +289,21 @@ def _execute_scan(request: ScanRequest, log: RunLogger) -> int:
         return 0
 
     _print_passed(screening, len(outcome.candidates))
-    _print_audits(outcome.audits)
-    _print_degradation(outcome.partial, outcome.dropped)
-    _print_cost(outcome.intent_usage, usage, outcome.total_cost_usd, outcome.audit_usage)
 
-    log.info("reached_stub", stage="report", note="Отчёт: следующий пункт плана")
+    report = outcome.report(limit=request.options.report_limit)
+    print()
+    print(render_markdown(report))
+
+    log.info(
+        "report_ready",
+        recommendation=report.recommendation.value,
+        target=report.recommendation_target,
+        candidates=len(report.candidates),
+        cache_hit=report.cache.audits_hit,
+        cache_miss=report.cache.audits_miss,
+    )
+
+    _print_cost(outcome.intent_usage, usage, outcome.total_cost_usd, outcome.audit_usage)
     return 0
 
 
@@ -444,6 +462,16 @@ def cmd_eval(args: argparse.Namespace) -> int:
         log.error("golden_set_invalid", detail=str(exc))
         print(f"Набор не читается: {exc}", file=sys.stderr)
         return 2
+
+    if args.only:
+        wanted = [slug.strip() for slug in args.only.split(",") if slug.strip()]
+        known = {case.slug for case in cases}
+        missing = [slug for slug in wanted if slug not in known]
+        if missing:
+            log.error("golden_subset_unknown", missing=missing)
+            print(f"В наборе нет задач: {', '.join(missing)}", file=sys.stderr)
+            return 2
+        cases = [case for case in cases if case.slug in set(wanted)]
 
     if args.limit is not None:
         cases = cases[: args.limit]

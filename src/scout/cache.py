@@ -1,17 +1,23 @@
-"""Кэш аудитов: SQLite, одна строка на `repo_id + head_sha` (SCHEMAS.md §9).
+"""Кэш аудитов: SQLite, одна строка на `repo_id + head_sha + prompt_version` (§9).
 
 Кэшируется **только** `AuditResult` Слоя 2. `ScreeningResult` Слоя 1 не кэшируется:
 он дёшев, а после распараллеливания ещё и быстр — хранение обошлось бы дороже
 пересчёта. Кэш по хешу текста запроса отвергнут в `decisions_log.md`: NL-запросы
 не совпадают побайтово, а один репозиторий попадает в выдачу многих разных задач.
 
-Инвалидация — только по смене `head_sha`. Новый коммит даёт новый ключ и,
-значит, автоматический промах; старая строка при этом остаётся жить. TTL по времени
-не используется: он либо отдаёт устаревшее, либо жжёт токены на неизменившемся коде.
+Инвалидация по двум осям. Смена `head_sha` — изменился код. Смена
+`prompt_version` — изменился вопрос, который мы про этот код задаём: `AuditResult`
+не свойство репозитория, а ответ конкретного промпта о нём. Без версии в ключе
+бамп до `l2-2` молча отдавал бы суждения `l2-1`, и замер «до и после», которого
+требует `CHECKLIST.md` при любой правке промпта, показывал бы «до» оба раза —
+ошибка тихая, числа приходят правдоподобные и неверные.
 
-Слой 2 появился на дне 11 и ходит сюда через `lookup_or_store`: попадание по
-ключу `repo:{repo_id}:{head_sha}` означает, что V4-Pro не вызывается вовсе.
-Готова политика `lookup_or_store` — ровно то место, куда Слой 2 встанет.
+Новый ключ даёт автоматический промах, старые строки остаются жить: прошлый
+прогон должен воспроизводиться. TTL по времени не используется — он либо отдаёт
+устаревшее, либо жжёт токены на неизменившемся коде.
+
+Слой 2 ходит сюда через `lookup_or_store`: попадание означает, что V4-Pro
+не вызывается вовсе.
 """
 
 import json
@@ -35,21 +41,28 @@ PAYLOAD_TYPE = "audit_result_v1"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audits (
-    key          TEXT PRIMARY KEY,
-    repo_id      INTEGER NOT NULL,
-    head_sha     TEXT NOT NULL,
-    payload_type TEXT NOT NULL DEFAULT 'audit_result_v1',
-    payload      TEXT NOT NULL,
-    created_at   TEXT NOT NULL,
-    hits         INTEGER NOT NULL DEFAULT 0
+    key            TEXT PRIMARY KEY,
+    repo_id        INTEGER NOT NULL,
+    head_sha       TEXT NOT NULL,
+    prompt_version TEXT NOT NULL DEFAULT 'l2-1',
+    payload_type   TEXT NOT NULL DEFAULT 'audit_result_v1',
+    payload        TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    hits           INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS audits_repo_id ON audits (repo_id);
 """
 
 
-def cache_key(repo_id: int, head_sha: str) -> str:
-    """`repo:{repo_id}:{head_sha}` — ключ собирает код, а не модель."""
-    return f"repo:{repo_id}:{head_sha}"
+LEGACY_PROMPT_VERSION = "l2-1"
+"""Версия, которой сделаны все записи без суффикса в ключе: до дня 13 промпт
+Слоя 2 существовал ровно один, поэтому старые строки не выбрасываются,
+а домигрируются — иначе честные попадания терялись бы на ровном месте."""
+
+
+def cache_key(repo_id: int, head_sha: str, prompt_version: str) -> str:
+    """`repo:{repo_id}:{head_sha}:{prompt_version}` — ключ собирает код, а не модель."""
+    return f"repo:{repo_id}:{head_sha}:{prompt_version}"
 
 
 def _utc(value: str) -> datetime:
@@ -82,7 +95,29 @@ class AuditCache:
 
         with self._lock:
             self._connection.executescript(SCHEMA)
+            self._migrate_legacy_keys()
             self._connection.commit()
+
+    def _migrate_legacy_keys(self) -> None:
+        """Дописывает `:l2-1` ключам, созданным до появления версии в ключе.
+
+        Выбросить их было бы проще, но неправильно: все они сделаны единственным
+        существовавшим тогда промптом, это законные попадания, за которые уже
+        заплачено. Столбца `prompt_version` в старой таблице нет вовсе — его
+        добавляет `ALTER TABLE`, а `DEFAULT 'l2-1'` заполняет существующие строки.
+        """
+        columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(audits)").fetchall()
+        }
+        if "prompt_version" not in columns:
+            self._connection.execute(
+                f"ALTER TABLE audits ADD COLUMN prompt_version TEXT NOT NULL"
+                f" DEFAULT '{LEGACY_PROMPT_VERSION}'"
+            )
+
+        self._connection.execute(
+            "UPDATE audits SET key = key || ':' || prompt_version WHERE key NOT LIKE '%:l2-%'"
+        )
 
     # -- контекстный менеджер ------------------------------------------------
 
@@ -140,12 +175,14 @@ class AuditCache:
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO audits"
-                " (key, repo_id, head_sha, payload_type, payload, created_at, hits)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " (key, repo_id, head_sha, prompt_version, payload_type,"
+                "  payload, created_at, hits)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.key,
                     entry.repo_id,
                     entry.head_sha,
+                    entry.prompt_version,
                     entry.payload_type,
                     entry.payload.model_dump_json(),
                     _iso(entry.created_at),
@@ -170,6 +207,7 @@ class AuditCache:
             key=row["key"],
             repo_id=row["repo_id"],
             head_sha=row["head_sha"],
+            prompt_version=row["prompt_version"],
             payload_type=row["payload_type"],
             payload=AuditResult(**payload),
             created_at=_utc(row["created_at"]),
@@ -183,16 +221,16 @@ def lookup_or_store(
     repo_id: int,
     full_name: str,
     head_sha: str,
+    prompt_version: str,
     produce: Callable[[], AuditResult],
     logger: RunLogger | None = None,
 ) -> AuditResult:
     """Политика «сначала кэш»: попадание — модель не зовём, промах — зовём и запоминаем.
 
-    Сюда встанет Слой 2 (дни 11–12): `produce` — это его вызов модели. Политика
-    живёт здесь, а не в слое, чтобы условия попадания и запись события были
-    в одном месте с самим хранилищем.
+    `produce` — вызов модели Слоем 2. Политика живёт здесь, а не в слое, чтобы
+    условия попадания и запись события были в одном месте с самим хранилищем.
     """
-    key = cache_key(repo_id, head_sha)
+    key = cache_key(repo_id, head_sha, prompt_version)
 
     entry = cache.get_entry(key)
     if entry is not None:
@@ -202,12 +240,19 @@ def lookup_or_store(
                 repo_id=repo_id,
                 full_name=full_name,
                 head_sha=head_sha,
+                prompt_version=prompt_version,
                 hits=entry.hits,
             )
         return entry.payload
 
     if logger:
-        logger.info("cache_miss", repo_id=repo_id, full_name=full_name, head_sha=head_sha)
+        logger.info(
+            "cache_miss",
+            repo_id=repo_id,
+            full_name=full_name,
+            head_sha=head_sha,
+            prompt_version=prompt_version,
+        )
 
     result = produce()
     cache.put(
@@ -215,6 +260,7 @@ def lookup_or_store(
             key=key,
             repo_id=repo_id,
             head_sha=head_sha,
+            prompt_version=prompt_version,
             payload_type=PAYLOAD_TYPE,
             payload=result,
             created_at=datetime.now(UTC),

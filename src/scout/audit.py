@@ -32,6 +32,7 @@ from scout.cache import AuditCache, lookup_or_store
 from scout.deepseek import DeepSeekAuth, DeepSeekBadResponse, DeepSeekClient
 from scout.github import GitHubAuth, GitHubClient
 from scout.log import RunLogger
+from scout.regurgitation import RegurgitationDetected, assert_clean
 from scout.schemas import (
     AuditResult,
     Candidate,
@@ -168,6 +169,10 @@ def _assemble(
     """
     fields = {key: value for key, value in payload.items() if key not in _CODE_OWNED_FIELDS}
 
+    # Детектор регургитации стоит до сборки объекта, а не после: отклонённая
+    # запись не должна существовать даже в памяти как валидный `AuditResult`.
+    assert_clean(fields, material.as_prompt_block())
+
     passport_fields = dict(fields.get("license_passport") or {})
     passport_fields.pop("source", None)
     passport_fields.pop("code_reuse_allowed", None)
@@ -265,6 +270,27 @@ def audit_one(
 
         try:
             result = _assemble(payload, candidate, material, audited_at=audited_at)
+        except RegurgitationDetected as exc:
+            # Отказ принять запись, а не сбой: `ARCHITECTURE.md` → «Разделение
+            # контекстов». Повтор с явным требованием пересказать своими словами.
+            problems = [str(exc)]
+            if logger:
+                logger.error(
+                    "audit_regurgitation",
+                    full_name=candidate.full_name,
+                    attempt=attempt,
+                    field=exc.field,
+                    chars=len(exc.excerpt),
+                )
+            if attempt == MAX_ATTEMPTS:
+                break
+            user = (
+                f"{user}\n\n"
+                f"Поле {exc.field} дословно повторяет материал репозитория "
+                f"({len(exc.excerpt)} символов). Перескажи своими словами: "
+                "поля содержат факты и твою прозу, а не цитаты. Верни исправленный JSON."
+            )
+            continue
         except ValidationError as exc:
             problems = _format_errors(exc)
             if logger:
@@ -346,6 +372,7 @@ def audit_candidates(
                         repo_id=candidate.repo_id,
                         full_name=candidate.full_name,
                         head_sha=candidate.head_sha,
+                        prompt_version=config.PROMPT_VERSIONS["l2"],
                         produce=produce,
                         logger=logger,
                     )

@@ -1,10 +1,11 @@
-"""Кэш аудитов: SQLite, ключ `repo:{id}:{sha}`, инвалидация только по SHA.
+"""Кэш аудитов: SQLite, ключ `repo:{id}:{sha}:{prompt_version}`.
 
 База поднимается в `tmp_path`, сети нет. Кэшируется **только** `AuditResult`
 Слоя 2: `ScreeningResult` Слоя 1 дёшев и после распараллеливания быстр,
 кэшировать его незачем (`ARCHITECTURE.md` → «Кэш»).
 """
 
+import sqlite3
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -13,6 +14,8 @@ import pytest
 from scout import cli
 from scout.cache import AuditCache, cache_key, lookup_or_store
 from scout.schemas import AuditResult, CacheEntry
+
+L2 = "l2-1"
 
 REQUEST_ID = UUID("6f1f1b9c-0000-4000-8000-000000000001")
 AUDITED_AT = datetime(2026, 9, 4, 12, 0, 0, tzinfo=UTC)
@@ -110,7 +113,8 @@ def audit_result(repo_id: int = 1, head_sha: str = SHA_A, **overrides) -> AuditR
 def entry(result: AuditResult | None = None, hits: int = 0) -> CacheEntry:
     result = result or audit_result()
     return CacheEntry(
-        key=cache_key(result.repo_id, result.head_sha),
+        key=cache_key(result.repo_id, result.head_sha, L2),
+        prompt_version=L2,
         repo_id=result.repo_id,
         head_sha=result.head_sha,
         payload_type="audit_result_v1",
@@ -156,13 +160,13 @@ def test_database_file_is_created_on_first_use(tmp_path):
 
 
 def test_cache_key_matches_the_schema_pattern():
-    """`SCHEMAS.md` §9: ^repo:\\d+:[0-9a-f]{7,40}$ — ключ собирает код, не модель."""
-    assert cache_key(42, SHA_A) == f"repo:42:{SHA_A}"
+    """`SCHEMAS.md` §9: ^repo:\\d+:[0-9a-f]{7,40}:l2-\\d+$ — ключ собирает код."""
+    assert cache_key(42, SHA_A, L2) == f"repo:42:{SHA_A}:l2-1"
     entry(audit_result(repo_id=42))  # валидация паттерна — на модели CacheEntry
 
 
 def test_missing_key_is_a_miss(cache):
-    assert cache.get(cache_key(1, SHA_A)) is None
+    assert cache.get(cache_key(1, SHA_A, L2)) is None
 
 
 # --------------------------------------------------------------------------
@@ -174,7 +178,7 @@ def test_put_then_get_returns_the_same_audit_result(cache):
     original = audit_result()
     cache.put(entry(original))
 
-    restored = cache.get(cache_key(1, SHA_A))
+    restored = cache.get(cache_key(1, SHA_A, L2))
 
     assert restored == original
 
@@ -184,7 +188,7 @@ def test_every_field_survives_serialisation(cache):
     original = audit_result()
     cache.put(entry(original))
 
-    restored = cache.get(cache_key(1, SHA_A))
+    restored = cache.get(cache_key(1, SHA_A, L2))
 
     assert restored.model_dump() == original.model_dump()
     assert restored.license_passport.source.retrieved_at == AUDITED_AT
@@ -197,7 +201,7 @@ def test_put_twice_replaces_the_row(cache):
     cache.put(entry(audit_result(verdict="FORK")))
 
     assert len(cache.entries()) == 1
-    assert cache.get(cache_key(1, SHA_A)).verdict.value == "FORK"
+    assert cache.get(cache_key(1, SHA_A, L2)).verdict.value == "FORK"
 
 
 # --------------------------------------------------------------------------
@@ -207,7 +211,7 @@ def test_put_twice_replaces_the_row(cache):
 
 def test_hits_are_counted_on_every_read(cache):
     cache.put(entry(audit_result()))
-    key = cache_key(1, SHA_A)
+    key = cache_key(1, SHA_A, L2)
 
     cache.get(key)
     cache.get(key)
@@ -219,8 +223,8 @@ def test_new_head_sha_is_a_miss(cache):
     """Инвалидация только по SHA: новый коммит — новый ключ, TTL нет."""
     cache.put(entry(audit_result(head_sha=SHA_A)))
 
-    assert cache.get(cache_key(1, SHA_B)) is None
-    assert cache.get(cache_key(1, SHA_A)) is not None
+    assert cache.get(cache_key(1, SHA_B, L2)) is None
+    assert cache.get(cache_key(1, SHA_A, L2)) is not None
 
 
 def test_old_entry_survives_invalidation(cache):
@@ -242,7 +246,7 @@ def test_refresh_ignores_existing_entry(tmp_path):
         warm.put(entry(audit_result()))
 
     with AuditCache(path, refresh=True) as cold:
-        assert cold.get(cache_key(1, SHA_A)) is None
+        assert cold.get(cache_key(1, SHA_A, L2)) is None
 
 
 def test_refresh_still_writes_fresh_entries(tmp_path):
@@ -251,7 +255,7 @@ def test_refresh_still_writes_fresh_entries(tmp_path):
         cache.put(entry(audit_result(verdict="BUILD")))
 
     with AuditCache(path) as reopened:
-        assert reopened.get(cache_key(1, SHA_A)).verdict.value == "BUILD"
+        assert reopened.get(cache_key(1, SHA_A, L2)).verdict.value == "BUILD"
 
 
 def test_refresh_does_not_count_hits(tmp_path):
@@ -260,7 +264,7 @@ def test_refresh_does_not_count_hits(tmp_path):
         warm.put(entry(audit_result()))
 
     with AuditCache(path, refresh=True) as cold:
-        cold.get(cache_key(1, SHA_A))
+        cold.get(cache_key(1, SHA_A, L2))
 
     with AuditCache(path) as reopened:
         assert reopened.entries()[0].hits == 0
@@ -289,10 +293,22 @@ def test_second_lookup_with_the_same_key_costs_zero_model_calls(cache):
     logger = Recorder()
 
     first = lookup_or_store(
-        cache, repo_id=1, full_name="owner1/repo1", head_sha=SHA_A, produce=auditor, logger=logger
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version=L2,
+        produce=auditor,
+        logger=logger,
     )
     second = lookup_or_store(
-        cache, repo_id=1, full_name="owner1/repo1", head_sha=SHA_A, produce=auditor, logger=logger
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version=L2,
+        produce=auditor,
+        logger=logger,
     )
 
     assert auditor.calls == 1
@@ -310,6 +326,7 @@ def test_cache_hit_event_carries_what_the_report_needs(cache):
             repo_id=1,
             full_name="owner1/repo1",
             head_sha=SHA_A,
+            prompt_version=L2,
             produce=auditor,
             logger=logger,
         )
@@ -324,9 +341,23 @@ def test_cache_hit_event_carries_what_the_report_needs(cache):
 def test_new_commit_sends_the_candidate_back_to_the_model(cache):
     auditor = CountingAuditor()
 
-    lookup_or_store(cache, repo_id=1, full_name="owner1/repo1", head_sha=SHA_A, produce=auditor)
+    lookup_or_store(
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version=L2,
+        produce=auditor,
+    )
     auditor.result = audit_result(head_sha=SHA_B)
-    lookup_or_store(cache, repo_id=1, full_name="owner1/repo1", head_sha=SHA_B, produce=auditor)
+    lookup_or_store(
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_B,
+        prompt_version=L2,
+        produce=auditor,
+    )
 
     assert auditor.calls == 2
     assert len(cache.entries()) == 2
@@ -337,17 +368,38 @@ def test_refresh_sends_everything_back_to_the_model(tmp_path):
     auditor = CountingAuditor()
 
     with AuditCache(path) as warm:
-        lookup_or_store(warm, repo_id=1, full_name="owner1/repo1", head_sha=SHA_A, produce=auditor)
+        lookup_or_store(
+            warm,
+            repo_id=1,
+            full_name="owner1/repo1",
+            head_sha=SHA_A,
+            prompt_version=L2,
+            produce=auditor,
+        )
 
     with AuditCache(path, refresh=True) as cold:
-        lookup_or_store(cold, repo_id=1, full_name="owner1/repo1", head_sha=SHA_A, produce=auditor)
+        lookup_or_store(
+            cold,
+            repo_id=1,
+            full_name="owner1/repo1",
+            head_sha=SHA_A,
+            prompt_version=L2,
+            produce=auditor,
+        )
 
     assert auditor.calls == 2
 
 
 def test_stored_entry_keeps_the_payload_type_of_its_version(cache):
     auditor = CountingAuditor()
-    lookup_or_store(cache, repo_id=1, full_name="owner1/repo1", head_sha=SHA_A, produce=auditor)
+    lookup_or_store(
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version=L2,
+        produce=auditor,
+    )
 
     assert cache.entries()[0].payload_type == "audit_result_v1"
 
@@ -418,3 +470,106 @@ def test_cache_drop_removes_the_repository(cache_path, capsys):
 
     with AuditCache(cache_path) as reopened:
         assert reopened.entries() == []
+
+
+# --------------------------------------------------------------------------
+# Версия промпта в ключе (день 13)
+# --------------------------------------------------------------------------
+
+
+def test_bumping_the_prompt_sends_the_candidate_back_to_the_model(cache):
+    """`AuditResult` — ответ конкретного промпта о репозитории, а не свойство
+    репозитория. Без версии в ключе бамп до `l2-2` молча отдавал бы суждения
+    `l2-1`, и замер «до и после» показывал бы «до» оба раза."""
+    auditor = CountingAuditor()
+
+    lookup_or_store(
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version="l2-1",
+        produce=auditor,
+    )
+    lookup_or_store(
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version="l2-2",
+        produce=auditor,
+    )
+
+    assert auditor.calls == 2
+
+
+def test_old_version_stays_readable_after_a_bump(cache):
+    """Записи прошлой версии не выбрасываются: прошлый прогон должен
+    воспроизводиться, иначе сравнивать «до и после» будет не с чем."""
+    auditor = CountingAuditor()
+    lookup_or_store(
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version="l2-1",
+        produce=auditor,
+    )
+    lookup_or_store(
+        cache,
+        repo_id=1,
+        full_name="owner1/repo1",
+        head_sha=SHA_A,
+        prompt_version="l2-2",
+        produce=auditor,
+    )
+
+    assert cache.get(cache_key(1, SHA_A, "l2-1")) is not None
+    assert cache.get(cache_key(1, SHA_A, "l2-2")) is not None
+
+
+def test_keys_written_before_the_bump_are_migrated_not_dropped(tmp_path):
+    """Все записи, сделанные до дня 13, принадлежат единственному существовавшему
+    тогда промпту. Выбросить их значило бы потерять оплаченные попадания."""
+    path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "CREATE TABLE audits ("
+        " key TEXT PRIMARY KEY, repo_id INTEGER NOT NULL, head_sha TEXT NOT NULL,"
+        " payload_type TEXT NOT NULL, payload TEXT NOT NULL,"
+        " created_at TEXT NOT NULL, hits INTEGER NOT NULL DEFAULT 0);"
+    )
+    connection.execute(
+        "INSERT INTO audits VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            f"repo:1:{SHA_A}",
+            1,
+            SHA_A,
+            "audit_result_v1",
+            audit_result().model_dump_json(),
+            "2026-09-12T00:00:00Z",
+            7,
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    with AuditCache(path) as migrated:
+        entries = migrated.entries()
+
+        assert [item.key for item in entries] == [f"repo:1:{SHA_A}:l2-1"]
+        assert entries[0].prompt_version == "l2-1"
+        assert entries[0].hits == 7
+        assert migrated.get(cache_key(1, SHA_A, "l2-1")) is not None
+
+
+def test_migration_is_idempotent(tmp_path):
+    """Открытие кэша дважды не должно приписывать суффикс второй раз."""
+    path = tmp_path / "twice.sqlite3"
+    with AuditCache(path) as first:
+        first.put(entry(audit_result()))
+
+    with AuditCache(path) as second:
+        with AuditCache(path) as third:
+            assert [item.key for item in third.entries()] == [f"repo:1:{SHA_A}:l2-1"]
+        assert len(second.entries()) == 1

@@ -75,10 +75,11 @@ def test_generated_queries_are_logged_verbatim(ok_intent, offline, capsys):
     assert len(queries) == 7
 
 
-def test_stub_now_stands_at_the_report(ok_intent, offline, capsys):
-    """Слой 2 закрыт на дне 11 — следующая незакрытая стадия уже отчёт (день 13)."""
-    cli.main(["scan", QUERY])
-    assert events(capsys)["reached_stub"]["stage"] == "report"
+def test_pipeline_reaches_the_report(ok_intent, offline, capsys):
+    """День 13 закрыл последнюю стадию: заглушек в конвейере не осталось,
+    вместо них событие готового отчёта."""
+    ready = events(capsys) if cli.main(["scan", QUERY]) == 0 else {}
+    assert ready["report_ready"]["recommendation"] in ("USE", "FORK", "BUILD")
 
 
 def test_stages_are_announced_in_pipeline_order(ok_intent, offline, capsys):
@@ -87,7 +88,7 @@ def test_stages_are_announced_in_pipeline_order(ok_intent, offline, capsys):
     stages = [
         record["stage"] for record in _all_events(capsys) if record["event"] == "reached_stub"
     ]
-    assert stages == ["screening", "audit", "report"]
+    assert stages == ["screening", "audit"]
 
 
 def test_passed_candidates_are_printed_with_relevance_and_reason(ok_intent, offline, capsys):

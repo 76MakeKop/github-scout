@@ -482,9 +482,10 @@ class Report(SchemaModel):
 
 
 class CacheEntry(SchemaModel):
-    key: Annotated[str, StringConstraints(pattern=r"^repo:\d+:[0-9a-f]{7,40}$")]
+    key: Annotated[str, StringConstraints(pattern=r"^repo:\d+:[0-9a-f]{7,40}:l2-\d+$")]
     repo_id: int
     head_sha: CommitSha
+    prompt_version: Annotated[str, StringConstraints(pattern=r"^l2-\d+$")]
     payload_type: Literal["audit_result_v1"]
     payload: AuditResult
     created_at: UtcDatetime
