@@ -28,7 +28,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from scout import config
+from scout import config, snapshot
 from scout.cache import DEFAULT_CACHE_PATH, AuditCache
 from scout.config import MissingCredential
 from scout.deepseek import DeepSeekAuth, DeepSeekError
@@ -37,6 +37,7 @@ from scout.evaluate import (
     DEFAULT_GOLDEN_DIR,
     EvalError,
     EvalRun,
+    GoldenCase,
     evaluate,
     load_cases,
     write_report,
@@ -57,6 +58,7 @@ from scout.schemas import (
     TokenUsage,
 )
 from scout.screening import ScreeningRun
+from scout.snapshot import FrozenCase, ReplayStage, SnapshotIncomplete
 
 BUILD_ADVICE = "Кандидатов нет — рекомендация BUILD: подходящего открытого решения не нашлось."
 
@@ -146,6 +148,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="черновик прогона: задача пишется на диск сразу, как отработала. "
         "Повторный запуск с тем же файлом досчитывает только недостающее "
         "и не платит за уже измеренное",
+    )
+    evaluation.add_argument(
+        "--freeze",
+        default=None,
+        help="записать выдачу прогона в снимок: интент, запросы, кандидаты и "
+        "результат Слоя 1 по каждой задаче. Снимок — вход будущих плеч A/B",
+    )
+    evaluation.add_argument(
+        "--replay",
+        default=None,
+        help="взять выдачу из снимка вместо живой. Оба плеча A/B, прогнанные "
+        "по одному снимку, различаются ровно тем слоем, который правят",
+    )
+    evaluation.add_argument(
+        "--replay-through",
+        choices=[stage.value for stage in ReplayStage],
+        default=ReplayStage.SCREENING.value,
+        help="докуда брать записанное: `search` — заморожены кандидаты, Слой 1 "
+        "идёт живьём (замер промпта Слоя 1); `screening` — заморожен и Слой 1, "
+        "живьём идёт только Слой 2 (замер промпта Слоя 2, по умолчанию)",
     )
     evaluation.add_argument(
         "--dry-run",
@@ -482,6 +504,19 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print(f"  {case.slug:24} {case.query_text}")
         print(f"  {'':24} эталон: {target}")
 
+    stage = ReplayStage(args.replay_through)
+    try:
+        replay = _load_replay(args, cases, stage, log)
+    except EvalError as exc:
+        print(f"Снимок не годится: {exc}", file=sys.stderr)
+        return 2
+
+    if replay is not None:
+        frozen_layers = "поиск" if stage is ReplayStage.SEARCH else "поиск и Слой 1"
+        live_layers = "Слой 1 и Слой 2" if stage is ReplayStage.SEARCH else "Слой 2"
+        print(f"\nПрогон по снимку {args.replay}: заморожены {frozen_layers}.")
+        print(f"Живьём идёт {live_layers} — стоимость ниже показывает только его.")
+
     if args.dry_run:
         print("\nПроверка набора пройдена. Прогон не запускался (--dry-run).")
         return 0
@@ -498,6 +533,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
             options=options,
             log=log,
             journal=Path(args.journal) if args.journal else None,
+            freeze_to=Path(args.freeze) if args.freeze else None,
+            replay=replay,
+            replay_through=stage,
+            replay_source=args.replay,
         )
     except (MissingCredential, DeepSeekAuth, GitHubAuth) as exc:
         return _credential_error(log, exc)
@@ -514,6 +553,43 @@ def cmd_eval(args: argparse.Namespace) -> int:
     path = write_report(run, Path(args.out))
     print(f"\nПодробности прогона: {path}")
     return 0
+
+
+def _load_replay(
+    args: argparse.Namespace,
+    cases: list[GoldenCase],
+    stage: ReplayStage,
+    log: RunLogger,
+) -> dict[str, FrozenCase] | None:
+    """Снимок для `--replay`, проверенный до первого платного вызова.
+
+    Проверяется здесь, а не по ходу прогона: задача, которой в снимке нет,
+    оборвала бы набор на середине, когда предыдущие уже оплачены. Совпадение
+    путей `--freeze` и `--replay` — тоже отказ: файл, из которого читают,
+    нельзя дописывать тем же прогоном, иначе снимок перестанет быть снимком.
+    """
+    if not args.replay:
+        return None
+
+    if args.freeze and Path(args.freeze) == Path(args.replay):
+        raise EvalError("`--freeze` и `--replay` указывают на один файл")
+
+    try:
+        cases_by_slug = snapshot.read(Path(args.replay))
+    except SnapshotIncomplete as exc:
+        log.error("snapshot_unusable", detail=str(exc))
+        raise EvalError(str(exc)) from exc
+
+    absent = snapshot.missing(cases_by_slug, [case.slug for case in cases], stage)
+    if absent:
+        log.error("snapshot_incomplete", missing=absent, stage=stage.value)
+        raise EvalError(
+            f"в снимке нет задач до этапа «{stage.value}»: {', '.join(absent)}. "
+            "Прогоняйте подмножество через --only или запишите снимок заново"
+        )
+
+    log.info("snapshot_loaded", path=args.replay, cases=len(cases_by_slug), stage=stage.value)
+    return cases_by_slug
 
 
 def _print_eval(run: EvalRun, options: ScanOptions) -> None:

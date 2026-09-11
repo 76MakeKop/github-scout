@@ -14,6 +14,12 @@
 Наружу выходит `ScanOutcome`, из которого `report.build_report` собирает `Report`;
 сборка живёт отдельным модулем, потому что она детерминированная и её читают
 двое — печать человеку и прогон golden-set, считающий recall@5.
+
+Верхние этапы можно не выполнять, а взять из снимка (`snapshot.py`): тогда
+`frozen` приносит интент, запросы, `Candidate[]` и — если просят заморозить
+и Слой 1 — его результат. Это не оптимизация, а условие исполнимости замера
+«до и после»: без неё плечи A/B расходятся выше правки, и правку не видно
+за разбросом (`decisions_log.md`, 2026-09-11).
 """
 
 import time
@@ -44,6 +50,7 @@ from scout.schemas import (
 )
 from scout.screening import ScreeningRun, screen
 from scout.search import collect_candidates
+from scout.snapshot import FrozenCase, ReplayStage, SnapshotIncomplete
 
 CACHE_PATH = DEFAULT_CACHE_PATH
 """Куда Слой 2 кладёт аудиты. Отдельным именем модуля, а не литералом внутри
@@ -207,30 +214,31 @@ def _run_audit(
     return results, failed, counters, hits
 
 
-def run_scan(
+@dataclass
+class _Prepared:
+    """Вход Слоя 1: добытый живьём или поднятый из снимка.
+
+    Клиент GitHub входит сюда же, потому что создаётся он по дороге — живому
+    пути он нужен для поиска, — а нужен и дальше, Слою 1 и Слою 2.
+    """
+
+    intent: Intent
+    intent_usage: TokenUsage
+    queries_used: list[str]
+    candidates: list[Candidate]
+    dropped: list[DroppedCandidate]
+    partial: bool
+    github: GitHubClient
+
+
+def _prepare(
     request: ScanRequest,
     *,
     log: RunLogger,
-    github: GitHubClient | None = None,
-    now: datetime | None = None,
-) -> ScanOutcome:
-    """Один скан целиком. Бросает доменные исключения, не ловит их за вызывающего.
-
-    `github` принимается снаружи, чтобы прогон golden-set мог переиспользовать
-    один клиент на все задачи: троттлинг поиска и счётчик запросов живут в нём,
-    и новый клиент на каждую задачу означал бы обнуление обоих.
-    """
-    started = time.monotonic()
-    now = now or datetime.now(UTC)
-
-    log.info(
-        "start",
-        request_id=str(request.request_id),
-        query_text=request.query_text,
-        options=request.options.model_dump(),
-        pricing_window="peak" if config.is_peak(now) else "off-peak",
-    )
-
+    github: GitHubClient | None,
+    now: datetime,
+) -> _Prepared:
+    """Живой путь: интент, запросы, поиск."""
     extraction = extract_intent(request.query_text, request_id=request.request_id, logger=log)
     if extraction.status == "failed":
         log.error("intent_failed", attempts=extraction.attempts, problems=extraction.errors)
@@ -268,36 +276,161 @@ def run_scan(
         logger=log,
     )
 
-    if not found.candidates:
+    return _Prepared(
+        intent=intent,
+        intent_usage=intent_usage,
+        queries_used=found.queries_used,
+        candidates=found.candidates,
+        dropped=found.dropped,
+        partial=found.partial,
+        github=github,
+    )
+
+
+def _prepare_from_snapshot(
+    request: ScanRequest,
+    frozen: FrozenCase,
+    *,
+    log: RunLogger,
+    github: GitHubClient | None,
+    now: datetime,
+) -> _Prepared:
+    """Путь по снимку: интент, запросы и кандидаты берутся записанными.
+
+    `request_id` переписывается на текущий: он идентифицирует прогон, а не
+    выдачу, и оставить в интенте чужой значит связать провенанс сегодняшнего
+    аудита с прогоном, которого сегодня не было.
+
+    Расход токенов здесь нулевой, и это не округление: замороженные слои сегодня
+    не вызывались. Стоимость прогона по снимку — цена того, что действительно
+    оплачено, иначе плечи A/B сравнивались бы по счёту чужого прогона.
+    """
+    intent = frozen.intent.model_copy(update={"request_id": request.request_id})
+
+    log.info(
+        "replay_prepared",
+        slug=frozen.slug,
+        recorded_at=frozen.recorded_at.isoformat().replace("+00:00", "Z"),
+        candidates=len(frozen.candidates),
+        queries=len(frozen.queries_used),
+        screening_frozen=frozen.screening is not None,
+        prompt_version=intent.prompt_version,
+    )
+
+    return _Prepared(
+        intent=intent,
+        intent_usage=token_usage(ModelName.FLASH, {}, moment=now),
+        queries_used=list(frozen.queries_used),
+        candidates=list(frozen.candidates),
+        dropped=list(frozen.dropped),
+        partial=False,
+        github=github or GitHubClient(token=config.github_token(), logger=log),
+    )
+
+
+def _frozen_screening(frozen: FrozenCase, request: ScanRequest, *, now: datetime) -> ScreeningRun:
+    """Слой 1 из снимка: тот же `passed`, свой `request_id`, нулевой счёт.
+
+    `passed` подрезается под `audit_limit` текущего прогона: снимок говорит,
+    кто прошёл, а сколько из прошедших оплачивать на Слое 2 — решение этого
+    запуска. Расширить снимком нельзя, только сузить.
+    """
+    assert frozen.screening is not None  # проверено `missing` до первого вызова
+    result = frozen.screening.model_copy(
+        update={
+            "request_id": request.request_id,
+            "passed": frozen.screening.passed[: request.options.audit_limit],
+            "token_usage": token_usage(ModelName.FLASH, {}, moment=now),
+        }
+    )
+    return ScreeningRun(result=result, failed=list(frozen.screening_failed))
+
+
+def run_scan(
+    request: ScanRequest,
+    *,
+    log: RunLogger,
+    github: GitHubClient | None = None,
+    now: datetime | None = None,
+    frozen: FrozenCase | None = None,
+    replay_through: ReplayStage = ReplayStage.SCREENING,
+) -> ScanOutcome:
+    """Один скан целиком. Бросает доменные исключения, не ловит их за вызывающего.
+
+    `github` принимается снаружи, чтобы прогон golden-set мог переиспользовать
+    один клиент на все задачи: троттлинг поиска и счётчик запросов живут в нём,
+    и новый клиент на каждую задачу означал бы обнуление обоих.
+
+    `frozen` — снимок этой же задачи (`snapshot.py`). С ним верхние этапы не
+    выполняются, а поднимаются с диска: до `replay_through` включительно.
+    Смысл — в замере: слой, который правят, обязан быть единственным, что
+    отличает два прогона.
+    """
+    started = time.monotonic()
+    now = now or datetime.now(UTC)
+
+    log.info(
+        "start",
+        request_id=str(request.request_id),
+        query_text=request.query_text,
+        options=request.options.model_dump(),
+        pricing_window="peak" if config.is_peak(now) else "off-peak",
+        replay=replay_through.value if frozen else None,
+    )
+
+    if frozen is None:
+        prepared = _prepare(request, log=log, github=github, now=now)
+    else:
+        if not frozen.has(replay_through):
+            raise SnapshotIncomplete(
+                f"в снимке задачи {frozen.slug} нет результата Слоя 1: "
+                "воспроизвести можно только до поиска (--replay-through search)"
+            )
+        prepared = _prepare_from_snapshot(request, frozen, log=log, github=github, now=now)
+
+    intent = prepared.intent
+    intent_usage = prepared.intent_usage
+    github = prepared.github
+
+    if not prepared.candidates:
         log.info(
             "scan_build_recommended",
             reason="no_candidates",
-            queries=found.queries_used,
-            partial=found.partial,
+            queries=prepared.queries_used,
+            partial=prepared.partial,
         )
         return ScanOutcome(
             request=request,
             status=ScanStatus.NO_CANDIDATES,
             intent=intent,
             intent_usage=intent_usage,
-            queries_used=found.queries_used,
-            dropped=found.dropped,
-            partial=found.partial,
+            queries_used=prepared.queries_used,
+            dropped=prepared.dropped,
+            partial=prepared.partial,
             duration_sec=time.monotonic() - started,
         )
 
-    log.info("reached_stub", stage="screening", note="Слой 1: скрининг кандидатов")
+    if frozen is not None and replay_through is ReplayStage.SCREENING:
+        screening = _frozen_screening(frozen, request, now=now)
+        log.info(
+            "replay_screening",
+            slug=frozen.slug,
+            passed=len(screening.result.passed),
+            prompt_version=screening.result.prompt_version,
+        )
+    else:
+        log.info("reached_stub", stage="screening", note="Слой 1: скрининг кандидатов")
 
-    screening = screen(
-        found.candidates,
-        intent,
-        request_id=request.request_id,
-        github=github,
-        logger=log,
-        limit=request.options.audit_limit,
-    )
+        screening = screen(
+            prepared.candidates,
+            intent,
+            request_id=request.request_id,
+            github=github,
+            logger=log,
+            limit=request.options.audit_limit,
+        )
 
-    dropped = found.dropped + [
+    dropped = prepared.dropped + [
         DroppedCandidate(
             full_name=full_name,
             stage=DropStage.SCREENING,
@@ -305,7 +438,7 @@ def run_scan(
         )
         for full_name in screening.failed
     ]
-    partial = found.partial or bool(screening.failed)
+    partial = prepared.partial or bool(screening.failed)
 
     usage = screening.result.token_usage
     log.info(
@@ -322,7 +455,7 @@ def run_scan(
     audits_hit = 0
     if screening.result.passed:
         audits, audit_failed, audit_counters, audits_hit = _run_audit(
-            found.candidates,
+            prepared.candidates,
             screening=screening,
             intent=intent,
             github=github,
@@ -347,8 +480,8 @@ def run_scan(
         status=ScanStatus.OK if screening.result.passed else ScanStatus.NONE_PASSED,
         intent=intent,
         intent_usage=intent_usage,
-        queries_used=found.queries_used,
-        candidates=found.candidates,
+        queries_used=prepared.queries_used,
+        candidates=prepared.candidates,
         screening=screening,
         audits=audits,
         audit_usage=audit_usage,
@@ -380,8 +513,8 @@ def run_scan(
         log.info(
             "scan_build_recommended",
             reason="none_passed",
-            screened=len(found.candidates),
-            queries=found.queries_used,
+            screened=len(prepared.candidates),
+            queries=prepared.queries_used,
             partial=partial,
         )
 

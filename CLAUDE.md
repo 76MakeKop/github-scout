@@ -1,7 +1,7 @@
 # CLAUDE.md — базовый контракт проекта GitHub Scout
 
 **Сфера:** весь проект.
-**Обновлено:** 2026-09-03.
+**Обновлено:** 2026-09-11.
 **Статус:** MVP.
 
 ## Назначение
@@ -46,7 +46,13 @@ python -m scout cache drop <repo_id>
 python -m scout eval --golden tests/golden/ --dry-run   # проверить набор, не тратя денег
 python -m scout eval --limit 8 --max-candidates 15      # пилот: дёшево проверить харнесс
 python -m scout eval --golden tests/golden/             # полный прогон: recall@10 и recall@50
+python -m scout eval --only a,b --freeze eval/s.jsonl   # записать снимок выдачи
+python -m scout eval --only a,b --replay eval/s.jsonl   # плечо A/B по снимку
 ```
+
+Замер «до и после» при правке промпта идёт **только по снимку** (`ROADMAP.md` →
+«Процедура»): два живых прогона расходятся выше измеряемого слоя сильнее, чем
+на величину правки.
 
 ## Жёсткие запреты
 

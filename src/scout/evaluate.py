@@ -38,13 +38,14 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from scout import config
+from scout import config, snapshot
 from scout.config import MissingCredential
 from scout.deepseek import DeepSeekAuth
 from scout.github import GitHubAuth, GitHubClient
 from scout.log import RunLogger
 from scout.pipeline import ScanOutcome, run_scan
 from scout.schemas import ScanOptions, ScanRequest, SchemaModel, Verdict
+from scout.snapshot import FrozenCase, ReplayStage
 
 DEFAULT_GOLDEN_DIR = Path("tests/golden")
 DEFAULT_EVAL_DIR = Path("eval")
@@ -141,11 +142,18 @@ class CaseResult:
 
 @dataclass
 class EvalRun:
-    """Весь прогон: строки по задачам и сводка."""
+    """Весь прогон: строки по задачам и сводка.
+
+    `replay` записывает, по какому снимку прогон шёл. Без этой пометки два
+    файла `eval/{дата}.json` — честного замера на зафиксированной выдаче и
+    случайного, где разошёлся поиск, — выглядят одинаково, а `CHECKLIST.md`
+    требует приложить к правке промпта именно первый.
+    """
 
     results: list[CaseResult]
     options: ScanOptions
     generated_at: datetime
+    replay: dict[str, str] | None = None
 
     @property
     def measured(self) -> list[CaseResult]:
@@ -181,6 +189,7 @@ class EvalRun:
         return {
             "generated_at": self.generated_at.isoformat().replace("+00:00", "Z"),
             "options": self.options.model_dump(),
+            "replay": self.replay,
             "summary": self.summary(),
             "cases": [result.as_json() for result in self.results],
         }
@@ -320,8 +329,15 @@ def evaluate_case(
     log: RunLogger,
     github: GitHubClient | None = None,
     runner: Callable[..., ScanOutcome] = run_scan,
+    frozen: FrozenCase | None = None,
+    replay_through: ReplayStage = ReplayStage.SCREENING,
+    freeze_to: Path | None = None,
 ) -> CaseResult:
-    """Один прогон и его метрики. Сбой задачи не роняет набор (день 8)."""
+    """Один прогон и его метрики. Сбой задачи не роняет набор (день 8).
+
+    `frozen` подаёт задаче записанную выдачу вместо живой, `freeze_to` — наоборот,
+    записывает добытое для будущих плеч A/B (`snapshot.py`).
+    """
     request = ScanRequest(
         request_id=uuid4(),
         query_text=case.query_text,
@@ -330,8 +346,14 @@ def evaluate_case(
     )
     log.info("eval_case_started", slug=case.slug, query_text=case.query_text)
 
+    # Аргументы воспроизведения передаются, только когда они есть: подмены
+    # конвейера в тестах принимают ту же сигнатуру, что и `run_scan`, и лишний
+    # именованный аргумент означал бы правку каждой из них ради ветки, в которую
+    # они не заходят.
+    replay = {"frozen": frozen, "replay_through": replay_through} if frozen else {}
+
     try:
-        outcome = runner(request, log=log, github=github)
+        outcome = runner(request, log=log, github=github, **replay)
     except (MissingCredential, DeepSeekAuth, GitHubAuth):
         # Ключ одинаков для всех задач набора: продолжать значит потратить час
         # на двадцать пять одинаковых отказов.
@@ -345,6 +367,12 @@ def evaluate_case(
             expected=list(case.expected_repos),
             error=f"{type(exc).__name__}: {exc}",
         )
+
+    # Снимок пишется до сборки отчёта и до подсчёта метрик: выдача уже добыта
+    # и оплачена, а всё, что ниже, — арифметика, которая может упасть.
+    if freeze_to is not None:
+        snapshot.write_case(freeze_to, snapshot.freeze(case.slug, outcome))
+        log.info("snapshot_written", slug=case.slug, candidates=len(outcome.candidates))
 
     found = [candidate.full_name for candidate in outcome.candidates]
     passed = outcome.passed_full_names
@@ -418,6 +446,10 @@ def evaluate(
     github: GitHubClient | None = None,
     runner: Callable[..., ScanOutcome] = run_scan,
     journal: Path | None = None,
+    freeze_to: Path | None = None,
+    replay: dict[str, FrozenCase] | None = None,
+    replay_through: ReplayStage = ReplayStage.SCREENING,
+    replay_source: str | None = None,
 ) -> EvalRun:
     """Прогоняет набор целиком одним клиентом GitHub.
 
@@ -432,9 +464,21 @@ def evaluate(
     Повторный запуск с тем же файлом переиспользует измеренное и платит
     только за оставшееся. Упавшие задачи в журнал не идут: у них нет замера,
     и повторить их — единственное, что с ними можно сделать.
+
+    `freeze_to` записывает выдачу прогона, `replay` подаёт записанную вместо
+    живой. Вместе они делают исполнимым замер «до и после» из `CHECKLIST.md`:
+    без них плечи A/B расходятся выше правки, и правку не видно за разбросом.
     """
     options = options or ScanOptions()
     done = read_journal(journal) if journal is not None else {}
+
+    # Задача, которой в снимке нет, ушла бы в живой поиск молча — то есть дала бы
+    # плечо, несравнимое с соседним, и заметить это можно было бы только по
+    # расхождению в готовых числах. Отказ до первого платного вызова дешевле.
+    if replay is not None:
+        absent = snapshot.missing(replay, [case.slug for case in cases], replay_through)
+        if absent:
+            raise EvalError(f"в снимке нет задач до этапа «{replay_through.value}»: {absent}")
 
     results: list[CaseResult] = []
     for position, case in enumerate(cases, start=1):
@@ -455,12 +499,28 @@ def evaluate(
         # в него на второй задаче.
         github.reset_search_budget()
 
-        result = evaluate_case(case, options=options, log=log, github=github, runner=runner)
+        result = evaluate_case(
+            case,
+            options=options,
+            log=log,
+            github=github,
+            runner=runner,
+            frozen=replay.get(case.slug) if replay else None,
+            replay_through=replay_through,
+            freeze_to=freeze_to,
+        )
         results.append(result)
         if journal is not None and result.error is None:
             append_journal(journal, result)
 
-    run = EvalRun(results=results, options=options, generated_at=datetime.now(UTC))
+    run = EvalRun(
+        results=results,
+        options=options,
+        generated_at=datetime.now(UTC),
+        replay={"snapshot": replay_source or "", "through": replay_through.value}
+        if replay
+        else None,
+    )
     log.info("eval_done", **run.summary())
     return run
 
