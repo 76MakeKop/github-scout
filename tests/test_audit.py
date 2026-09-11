@@ -17,6 +17,7 @@ from scout.audit import (
     total_score,
 )
 from scout.cache import AuditCache
+from scout.config import PROMPT_VERSIONS
 from scout.deepseek import DeepSeekBadResponse
 from scout.log import RunLogger
 from scout.schemas import Copyleft, LicensePassport, Provenance, ProvenanceApi, Verdict
@@ -240,7 +241,7 @@ def test_audit_result_carries_code_owned_facts():
 
     assert result.full_name == subject.full_name
     assert result.head_sha == subject.head_sha
-    assert result.prompt_version == "l2-2"
+    assert result.prompt_version == PROMPT_VERSIONS["l2"]
     assert result.model.value == "deepseek-v4-pro"
     assert result.maintenance.last_commit == subject.pushed_at
     assert result.provenance
@@ -403,7 +404,11 @@ def test_audit_logs_the_verdict_and_the_licence():
 
 
 def test_prompt_file_exists_where_the_convention_says():
-    """`CLAUDE.md` → «Где живут промпты»: `l2-2` это `prompts/l2/v2.md`."""
+    """`CLAUDE.md` → «Где живут промпты»: `l2-N` это `prompts/l2/vN.md`.
+
+    Проверяется соглашение, а не номер: тест обязан ловить бамп версии без файла
+    рядом, но не обязан падать на каждом бампе сам.
+    """
     assert audit.load_system_prompt().strip()
 
 
