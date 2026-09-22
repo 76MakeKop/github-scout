@@ -180,7 +180,11 @@ class EvalRun:
             "target_met": _mean(result.recall_at_5 for result in measured) >= RECALL_TARGET,
             "verdicts": _verdict_totals(measured),
             "blocking_gaps": sum(result.blocking_gaps for result in measured),
-            "cost_usd_total": round(sum(result.cost_usd for result in measured), 6),
+            # Сумма по всем задачам, а не только по измеренным: упавшая задача
+            # не бесплатна. 2026-09-12 обе задачи умерли после Слоя 1, и прогон
+            # отчитался нулём при реально потраченных двух центах — при личном
+            # бюджете в центах такой отчёт хуже, чем никакого.
+            "cost_usd_total": round(sum(result.cost_usd for result in self.results), 6),
             "duration_sec_median": round(statistics.median(durations), 1) if durations else 0.0,
             "partial_runs": sum(1 for result in measured if result.partial),
         }

@@ -737,3 +737,28 @@ def test_broken_report_costs_one_case_not_the_whole_run():
 
     assert [result.status for result in run.results] == ["failed", "ok"]
     assert run.summary()["cases_measured"] == 1
+
+
+def test_money_spent_on_a_failed_case_still_shows_up_in_the_total():
+    """Упавшая задача не бесплатна, и прятать её трату — врать про бюджет.
+
+    Живой прогон 2026-09-12: обе задачи упали на чтении кэша **после** Слоя 1,
+    прогон отчитался «Стоимость: 0,0000 $», а на счёте DeepSeek к тому моменту
+    было потрачено около двух центов. При личном бюджете, где остаток измеряется
+    центами, отчёт, показывающий ноль вместо траты, хуже, чем никакого.
+    """
+
+    class Exploding(ScanOutcome):
+        def report(self, **kwargs):
+            raise ValueError("отчёт не собрался")
+
+    def runner(request, **kwargs):
+        base = outcome(cost=0.02)
+        return Exploding(**{f.name: getattr(base, f.name) for f in fields(base)})
+
+    run = evaluate([case("broken")], log=Recorder(), github=FakeClient(), runner=runner)
+
+    assert run.results[0].status == "failed"
+    assert run.results[0].cost_usd == pytest.approx(0.02)
+    assert run.summary()["cases_measured"] == 0
+    assert run.summary()["cost_usd_total"] == pytest.approx(0.02)

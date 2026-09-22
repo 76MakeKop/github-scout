@@ -436,7 +436,8 @@ def cmd_cache(args: argparse.Namespace) -> int:
     with AuditCache(DEFAULT_CACHE_PATH) as cache:
         if args.cache_command == "list":
             entries = cache.entries()
-            if not entries:
+            stale = cache.stale_keys()
+            if not entries and not stale:
                 print("Кэш пуст.")
                 return 0
 
@@ -447,6 +448,13 @@ def cmd_cache(args: argparse.Namespace) -> int:
                     f"  вердикт {entry.payload.verdict.value}"
                     f"  попаданий {entry.hits}"
                     f"  от {entry.created_at.date().isoformat()}"
+                )
+
+            if stale:
+                print(
+                    f"\nНе читаются сегодняшней схемой: {len(stale)}."
+                    " Это записи прошлых версий формата — они не мешают прогону"
+                    " и освобождаются через `scout cache drop <repo_id>`."
                 )
             return 0
 
