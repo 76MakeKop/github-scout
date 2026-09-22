@@ -1,0 +1,66 @@
+{
+  "generated_at": "2026-09-11T20:17:59.250924Z",
+  "options": {
+    "max_candidates": 20,
+    "audit_limit": 8,
+    "report_limit": 5,
+    "off_peak": false,
+    "refresh": false
+  },
+  "replay": null,
+  "summary": {
+    "cases_total": 2,
+    "cases_measured": 0,
+    "cases_failed": 2,
+    "traps": 0,
+    "recall_at_5": 0.0,
+    "recall_at_10": 0.0,
+    "recall_at_50": 0.0,
+    "target_met": false,
+    "verdicts": {},
+    "blocking_gaps": 0,
+    "cost_usd_total": 0,
+    "duration_sec_median": 0.0,
+    "partial_runs": 0
+  },
+  "cases": [
+    {
+      "slug": "feature-flags-self-hosted",
+      "query_text": "нужны фиче-флаги, но хостить у себя, не saas",
+      "status": "failed",
+      "expected": [
+        "Unleash/unleash",
+        "flagsmith/flagsmith",
+        "thomaspoignant/go-feature-flag"
+      ],
+      "found": [],
+      "passed": [],
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "recall_at_50": null,
+      "cost_usd": 0.0,
+      "duration_sec": 0.0,
+      "partial": false,
+      "verdicts": {},
+      "blocking_gaps": 0,
+      "error": "ValidationError: 4 validation errors for AuditResult\nfit.gaps.0\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No SAP HR data extraction', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type\nfit.gaps.1\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No payslip parsing', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type\nfit.gaps.2\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No mapping from SAP payr...ults to payment records', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type\nfit.gaps.3\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No payroll calculation o...ic statement generation', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type"
+    },
+    {
+      "slug": "trap-sap-payroll-bank-export",
+      "query_text": "выгрузить расчётные листки из нашего sap hr в формат зарплатной ведомости нашего банка",
+      "status": "failed",
+      "expected": [],
+      "found": [],
+      "passed": [],
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0,
+      "recall_at_50": null,
+      "cost_usd": 0.0,
+      "duration_sec": 0.0,
+      "partial": false,
+      "verdicts": {},
+      "blocking_gaps": 0,
+      "error": "ValidationError: 4 validation errors for AuditResult\nfit.gaps.0\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No SAP HR data extraction', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type\nfit.gaps.1\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No payslip parsing', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type\nfit.gaps.2\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No mapping from SAP payr...ults to payment records', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type\nfit.gaps.3\n  Input should be a valid dictionary or instance of Gap [type=model_type, input_value='No payroll calculation o...ic statement generation', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/model_type"
+    }
+  ]
+}
