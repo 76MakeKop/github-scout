@@ -182,7 +182,7 @@ def _run_audit(
     log.info("reached_stub", stage="audit", note="Слой 2: аудит прошедших скрининг")
 
     with AuditCache(CACHE_PATH, refresh=refresh) as cache:
-        before = {entry.key: entry.hits for entry in cache.entries()}
+        before = cache.hit_counts()
         results, failed, counters = audit_candidates(
             to_audit,
             intent,
@@ -192,7 +192,7 @@ def _run_audit(
             logger=log,
         )
 
-        after = {entry.key: entry.hits for entry in cache.entries()}
+        after = cache.hit_counts()
 
     # Попадание видно по выросшему счётчику `hits`: он растёт ровно в одном месте
     # (`AuditCache.get_entry`), поэтому сравнение до и после — точный счёт,

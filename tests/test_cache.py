@@ -5,6 +5,7 @@
 кэшировать его незачем (`ARCHITECTURE.md` → «Кэш»).
 """
 
+import json
 import sqlite3
 from datetime import UTC, datetime
 from uuid import UUID
@@ -573,3 +574,74 @@ def test_migration_is_idempotent(tmp_path):
         with AuditCache(path) as third:
             assert [item.key for item in third.entries()] == [f"repo:1:{SHA_A}:l2-1"]
         assert len(second.entries()) == 1
+
+
+# --------------------------------------------------------------------------
+# Записи прошлых версий схемы (найдено живым прогоном 2026-09-12)
+# --------------------------------------------------------------------------
+
+
+def stale_row(path, key: str, *, repo_id: int = 42) -> None:
+    """Строка, записанная до дня 13: `fit.gaps` — список строк, а не объектов.
+
+    Ровно то, что лежит в рабочем кэше: 78 записей `l2-1`, сделанных когда
+    `Gap` ещё не существовал. С точки зрения сегодняшней схемы они не читаются.
+    """
+    payload = audit_result(repo_id=repo_id).model_dump(mode="json")
+    payload["fit"]["gaps"] = ["нет выгрузки из SAP HR", "нет разбора расчётных листков"]
+
+    with AuditCache(path):  # таблица могла ещё не существовать
+        pass
+
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT OR REPLACE INTO audits"
+        " (key, repo_id, head_sha, prompt_version, payload_type, payload, created_at, hits)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (key, repo_id, SHA_A, "l2-1", "audit_result_v1", json.dumps(payload), "2026-09-04", 0),
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_unreadable_legacy_row_does_not_kill_the_whole_listing(tmp_path):
+    """Одна запись старого формата не имеет права ронять весь кэш.
+
+    Живой прогон 2026-09-12: `entries()` валидировал каждую строку базы, и
+    78 записей `l2-1` уронили скан **до первого вызова Слоя 2** — с чужой
+    задачи, чужими пробелами и нулевой стоимостью в отчёте.
+    """
+    path = tmp_path / "mixed.sqlite3"
+    with AuditCache(path) as opened:
+        opened.put(entry(audit_result(repo_id=1)))
+    stale_row(path, f"repo:42:{SHA_A}:l2-1")
+
+    with AuditCache(path) as reopened:
+        keys = [item.key for item in reopened.entries()]
+
+    assert keys == [f"repo:1:{SHA_A}:l2-1"]
+
+
+def test_unreadable_legacy_rows_are_counted_not_hidden(tmp_path):
+    """Пропустить молча — значит соврать про содержимое кэша: `scout cache list`
+    покажет меньше, чем есть, и никто не узнает, почему."""
+    path = tmp_path / "counted.sqlite3"
+    with AuditCache(path) as opened:
+        opened.put(entry(audit_result(repo_id=1)))
+    stale_row(path, f"repo:42:{SHA_A}:l2-1")
+
+    with AuditCache(path) as reopened:
+        reopened.entries()
+
+        assert reopened.stale_keys() == [f"repo:42:{SHA_A}:l2-1"]
+
+
+def test_hit_counts_never_touch_the_payload(tmp_path):
+    """Счёт попаданий — про `hits`, а не про содержимое. Конвейер снимает его
+    до и после аудита, и разбирать ради этого каждый payload значило бы ставить
+    весь скан в зависимость от строк, которые он даже не собирается читать."""
+    path = tmp_path / "hits.sqlite3"
+    stale_row(path, f"repo:42:{SHA_A}:l2-1")
+
+    with AuditCache(path) as opened:
+        assert opened.hit_counts() == {f"repo:42:{SHA_A}:l2-1": 0}

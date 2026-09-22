@@ -30,6 +30,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any
 
+from pydantic import ValidationError
+
 from scout import config
 from scout.log import RunLogger
 from scout.schemas import AuditResult, CacheEntry
@@ -99,6 +101,7 @@ class AuditCache:
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self._stale_keys: list[str] = []
 
         with self._lock:
             self._connection.executescript(SCHEMA)
@@ -169,12 +172,50 @@ class AuditCache:
         return entry.payload if entry is not None else None
 
     def entries(self) -> list[CacheEntry]:
-        """Всё содержимое — для `scout cache list`. Кэш маленький, страниц не нужно."""
+        """Всё содержимое — для `scout cache list`. Кэш маленький, страниц не нужно.
+
+        Строка, которая больше не читается сегодняшней схемой, пропускается,
+        а её ключ уходит в `stale_keys()`. Выбор в пользу пропуска сделан живым
+        прогоном 2026-09-12: `fit.gaps` стал объектом на дне 13, и 78 записей
+        `l2-1`, лежавших в рабочем кэше, роняли **весь скан** на чтении кэша —
+        до первого вызова Слоя 2, с чужой задачи и с нулём в графе стоимости.
+        Одна устаревшая запись не имеет права стоить прогона: это тот же довод,
+        по которому `snapshot.read` пропускает недописанную строку.
+        """
         with self._lock:
             rows = self._connection.execute(
                 "SELECT * FROM audits ORDER BY created_at DESC, key ASC"
             ).fetchall()
-        return [self._to_entry(row) for row in rows]
+
+        entries: list[CacheEntry] = []
+        stale: list[str] = []
+        for row in rows:
+            try:
+                entries.append(self._to_entry(row))
+            except (ValidationError, json.JSONDecodeError, TypeError):
+                stale.append(row["key"])
+
+        self._stale_keys = stale
+        return entries
+
+    def stale_keys(self) -> list[str]:
+        """Ключи, которые последний `entries()` не смог прочесть.
+
+        Пропускать молча значило бы соврать про содержимое кэша: `scout cache list`
+        показывал бы меньше, чем лежит, и причина была бы не видна никому.
+        """
+        return list(self._stale_keys)
+
+    def hit_counts(self) -> dict[str, int]:
+        """`key → hits` без разбора payload.
+
+        Конвейер снимает счётчики до и после аудита, чтобы посчитать попадания.
+        Ему нужны два числа, а не суждения модели, и ставить скан в зависимость
+        от разбора строк, которые он читать не собирается, незачем.
+        """
+        with self._lock:
+            rows = self._connection.execute("SELECT key, hits FROM audits").fetchall()
+        return {row["key"]: row["hits"] for row in rows}
 
     # -- запись --------------------------------------------------------------
 
