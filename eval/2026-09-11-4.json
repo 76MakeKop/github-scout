@@ -1,0 +1,126 @@
+{
+  "generated_at": "2026-09-11T21:17:21.028354Z",
+  "options": {
+    "max_candidates": 20,
+    "audit_limit": 8,
+    "report_limit": 5,
+    "off_peak": false,
+    "refresh": false
+  },
+  "replay": {
+    "snapshot": "eval/2026-09-12-smoke.jsonl",
+    "through": "screening"
+  },
+  "summary": {
+    "cases_total": 2,
+    "cases_measured": 2,
+    "cases_failed": 0,
+    "traps": 1,
+    "recall_at_5": 0.6667,
+    "recall_at_10": 0.6667,
+    "recall_at_50": 0.3333,
+    "target_met": true,
+    "verdicts": {
+      "USE": 5,
+      "BUILD": 3
+    },
+    "blocking_gaps": 0,
+    "cost_usd_total": 0.098693,
+    "duration_sec_median": 298.1,
+    "partial_runs": 0
+  },
+  "cases": [
+    {
+      "slug": "feature-flags-self-hosted",
+      "query_text": "нужны фиче-флаги, но хостить у себя, не saas",
+      "status": "ok",
+      "expected": [
+        "Unleash/unleash",
+        "flagsmith/flagsmith",
+        "thomaspoignant/go-feature-flag"
+      ],
+      "found": [
+        "Flagsmith/flagsmith",
+        "trunklabs/marshant",
+        "Webrowse/feature-flag-service-backend",
+        "borisdvlpr/itero",
+        "Featly-net/Featly",
+        "rkj706/adooflag",
+        "Akash-1808/flagcraft",
+        "Cenius-ai/vela-feature-flag-management-vlang",
+        "PreethamSanji/feature-flag-x",
+        "CrucialVansh/quickflags",
+        "phyowaiyan-dev/goappmon",
+        "divarun/AtlasFlag",
+        "blakebauman/edgevault",
+        "toggle-flow/ToggleFlow",
+        "iamsanjaykatta/vexil",
+        "kartik-7400/Feature-Flag-and-Remote-Config",
+        "Kareadita/Kavita",
+        "sipeed/picoclaw",
+        "kevinsmithwebdev/uflag",
+        "DarkFlippers/unleashed-firmware"
+      ],
+      "passed": [
+        "Flagsmith/flagsmith",
+        "Webrowse/feature-flag-service-backend",
+        "divarun/AtlasFlag",
+        "toggle-flow/ToggleFlow",
+        "rkj706/adooflag",
+        "Featly-net/Featly",
+        "iamsanjaykatta/vexil",
+        "Akash-1808/flagcraft"
+      ],
+      "recall_at_5": 0.3333,
+      "recall_at_10": 0.3333,
+      "recall_at_50": 0.3333,
+      "cost_usd": 0.098693,
+      "duration_sec": 596.1,
+      "partial": false,
+      "verdicts": {
+        "USE": 5,
+        "BUILD": 3
+      },
+      "blocking_gaps": 0,
+      "error": null
+    },
+    {
+      "slug": "trap-sap-payroll-bank-export",
+      "query_text": "выгрузить расчётные листки из нашего sap hr в формат зарплатной ведомости нашего банка",
+      "status": "none_passed",
+      "expected": [],
+      "found": [
+        "theturtle32/WebSocket-Node",
+        "bevry/caterpillar",
+        "jens-maus/node-ical",
+        "api-evangelist/successfactors",
+        "productdevbook/misina",
+        "api-evangelist/sap-successfactors",
+        "dharmafly/jsonpatch.js",
+        "bettiolo/oauth-signature-js",
+        "moll/js-must",
+        "1995parham/krtp",
+        "haraka/node-address-rfc2822",
+        "jdorner/node-sapnwrfc",
+        "dhensby/node-http-message-signatures",
+        "hildjj/node-abnf",
+        "enricoandreoli/adt-rfc-bridge",
+        "PDMLab/http-problem-details",
+        "chrisumbel/thirty-two",
+        "mercerheather476/turbo-garbanzo",
+        "kurtraschke/pyRFC3339",
+        "kazmiali/mailtester"
+      ],
+      "passed": [],
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0,
+      "recall_at_50": null,
+      "cost_usd": 0.0,
+      "duration_sec": 0.0,
+      "partial": false,
+      "verdicts": {},
+      "blocking_gaps": 0,
+      "error": null
+    }
+  ]
+}
